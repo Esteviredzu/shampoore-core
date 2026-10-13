@@ -1,0 +1,14 @@
+/shampoore-client
+/shampoore-server
+*.exe
+
+config_yandexboard.json
+
+*.log
+
+.vscode/
+.idea/
+*.swp
+*~
+
+/vendor/

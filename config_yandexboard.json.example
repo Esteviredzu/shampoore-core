@@ -1,0 +1,8 @@
+{
+  "name": "🇵🇱 Yandex-Polska",
+  "encryption_password": "VERY HARD PASSWORD",
+  "mode": "tun",
+  "yandex": {
+    "hash": "yandexboard_hash"
+  }
+}
