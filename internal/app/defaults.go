@@ -17,14 +17,7 @@ func defaultSettings() *Settings {
 			DNSServers: []string{"1.1.1.1:53", "8.8.8.8:53"},
 		},
 
-		Advanced: Advanced{
-			MuxFlushMs:        20,
-			MuxFlushThreshold: 12000,
-			ReliableWindow:    64,
-			ReliableChunk:     0,
-			PaddingEnabled:    true,
-			PaddingTarget:     14000,
-		},
+		Advanced: Advanced{},
 
 		transportKind: "yandex",
 	}

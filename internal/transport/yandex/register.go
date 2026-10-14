@@ -15,6 +15,20 @@ func init() {
 	app.RegisterTransport("yandex", buildRuntime)
 }
 
+var yandexDefaults = app.TransportDefaults{
+	MuxFlushMs:        20,
+	MuxFlushThreshold: 12000,
+
+	ReliableWindow: 64,
+	ReliableChunk:  0,
+
+	PaddingEnabled: true,
+	PaddingTarget:  14000,
+
+	JitterMinMs: 0,
+	JitterMaxMs: 0,
+}
+
 func buildRuntime(
 	ctx context.Context,
 	s *app.Settings,
@@ -30,6 +44,8 @@ func buildRuntime(
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
+
+	eff := s.Advanced.Effective(yandexDefaults)
 
 	creds, err := Bootstrap(ctx, cfg.Hash, cfg.ParticipantName)
 	if err != nil {
@@ -62,17 +78,13 @@ func buildRuntime(
 
 	var pipe transport.Pipe = NewYandexPipe(client, logger, pipeCfg)
 
-	if s.Advanced.PaddingEnabled {
-		target := s.Advanced.PaddingTarget
-		if target <= 0 {
-			target = 14000
-		}
-		pp, err := security.NewPaddingPipe(pipe, target)
+	if eff.PaddingEnabled {
+		pp, err := security.NewPaddingPipe(pipe, eff.PaddingTarget)
 		if err != nil {
 			return nil, err
 		}
 		pipe = pp
-		logger.Info("yandex: padding enabled; target=", target)
+		logger.Info("yandex: padding enabled; target=", eff.PaddingTarget)
 	}
 
 	if s.EncryptionPassword != "" {
@@ -84,16 +96,16 @@ func buildRuntime(
 		logger.Info("yandex: encryption enabled")
 	}
 
-	if s.Advanced.JitterMaxMs > 0 {
-		minD := time.Duration(s.Advanced.JitterMinMs) * time.Millisecond
-		maxD := time.Duration(s.Advanced.JitterMaxMs) * time.Millisecond
+	if eff.JitterMaxMs > 0 {
+		minD := time.Duration(eff.JitterMinMs) * time.Millisecond
+		maxD := time.Duration(eff.JitterMaxMs) * time.Millisecond
 		pipe = security.NewJitterPipe(pipe, minD, maxD)
 		logger.Info("yandex: jitter enabled")
 	}
 
 	session, err := transport.NewReliableSession(pipe, logger, transport.Config{
-		Window:    s.Advanced.ReliableWindow,
-		ChunkSize: s.Advanced.ReliableChunk,
+		Window:    eff.ReliableWindow,
+		ChunkSize: eff.ReliableChunk,
 	})
 	if err != nil {
 		return nil, err
@@ -115,5 +127,10 @@ func buildRuntime(
 		sides = append(sides, NewCleanupWorker(creds, logger, workerCfg))
 	}
 
-	return app.NewRuntime(session, bypass, sides), nil
+	rt := app.NewRuntime(session, bypass, sides)
+	rt.MuxConfig = app.MuxConfig{
+		FlushMs:        eff.MuxFlushMs,
+		FlushThreshold: eff.MuxFlushThreshold,
+	}
+	return rt, nil
 }

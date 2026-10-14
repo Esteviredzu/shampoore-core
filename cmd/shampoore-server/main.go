@@ -16,6 +16,7 @@ import (
 	"github.com/Esteviredzu/shampoore-core/internal/socks5"
 
 	_ "github.com/Esteviredzu/shampoore-core/internal/transport/yandex"
+	_ "github.com/Esteviredzu/shampoore-core/internal/transport/yandex_telemost"
 )
 
 func main() {
@@ -54,9 +55,10 @@ func main() {
 		log.Fatalf("build runtime: %v", err)
 	}
 
-	muxCfg := tunnel.DefaultConfig()
-	muxCfg.FlushThreshold = s.Advanced.MuxFlushThreshold
-	muxCfg.FlushInterval = time.Duration(s.Advanced.MuxFlushMs) * time.Millisecond
+	muxCfg := tunnel.Config{
+		FlushThreshold: rt.MuxConfig.FlushThreshold,
+		FlushInterval:  time.Duration(rt.MuxConfig.FlushMs) * time.Millisecond,
+	}
 	mux := tunnel.New(rt.Transport, lg, muxCfg)
 
 	if err := mux.Start(ctx); err != nil {

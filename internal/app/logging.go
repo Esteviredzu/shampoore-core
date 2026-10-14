@@ -1,3 +1,3 @@
 package app
 
-const LogLevel = "info"
+const LogLevel = "debug"

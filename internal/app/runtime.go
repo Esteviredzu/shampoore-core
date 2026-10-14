@@ -14,6 +14,7 @@ type SideService interface {
 type Runtime struct {
 	Transport    transport.Transport
 	BypassHosts  []string
+	MuxConfig    MuxConfig
 	sideServices []SideService
 	started      bool
 }

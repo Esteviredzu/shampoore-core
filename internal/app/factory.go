@@ -28,7 +28,7 @@ func BuildRuntime(
 ) (*Runtime, error) {
 	builder, ok := registry[s.TransportKind()]
 	if !ok {
-		return nil, fmt.Errorf("app: unknown transport %q", s.TransportKind)
+		return nil, fmt.Errorf("app: unknown transport %q", s.TransportKind())
 	}
 	return builder(ctx, s, role, logger)
 }

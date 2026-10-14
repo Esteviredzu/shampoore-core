@@ -1,0 +1,10 @@
+{
+  "name": "Telemost",
+  "encryption_password": "HLKDJHOhcnf31odh9n78dyhnnoiH234rsdygf7yd",
+  "mode": "socks5",
+  "transport_kind": "telemost",
+  "telemost": {
+    "conference_link": "https://telemost.yandex.ru/j/41514947350946",
+    "display_name": "Гость"
+  }
+}
