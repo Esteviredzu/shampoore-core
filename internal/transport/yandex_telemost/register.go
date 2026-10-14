@@ -3,39 +3,48 @@ package telemost
 import (
 	"context"
 	"encoding/json"
-	"errors"
 
 	"github.com/Esteviredzu/shampoore-core/internal/app"
 	"github.com/Esteviredzu/shampoore-core/internal/logging"
-	"github.com/Esteviredzu/shampoore-core/internal/transport/vp8"
 )
 
 func init() {
-	app.RegisterTransport("telemost", buildRuntime)
+	defaults := app.Values{
+		"mux_flush_ms":        10,
+		"mux_flush_threshold": 2000,
+
+		"reliable_window": 2,
+		"reliable_chunk":  1000,
+
+		"padding_enabled": false,
+		"padding_target":  0,
+
+		"jitter_min_ms": 0,
+		"jitter_max_ms": 0,
+
+		"vp8_send_delay_ms": 50,
+	}
+
+	err := app.RegisterDescriptor(app.Descriptor{
+		Kind:        "telemost",
+		DisplayName: "Yandex Telemost",
+		Defaults:    defaults,
+		DecodeURL:   decodeURL,
+		EncodeURL:   encodeURL,
+		Build:       buildTransport,
+	})
+	if err != nil {
+		panic(err)
+	}
 }
 
-var telemostDefaults = app.TransportDefaults{
-	MuxFlushMs:        10,
-	MuxFlushThreshold: 3000,
-
-	ReliableWindow: 4,
-	ReliableChunk:  100,
-
-	PaddingEnabled: true,
-	PaddingTarget:  1000,
-
-	JitterMinMs: 0,
-	JitterMaxMs: 0,
-
-	VP8SendDelayMs: 100,
-}
-
-func buildRuntime(
+func buildTransport(
 	ctx context.Context,
 	s *app.Settings,
 	role string,
 	logger logging.ContextLogger,
-) (*app.Runtime, error) {
+	eff app.Values,
+) (*app.BuildResult, error) {
 	cfg := DefaultConfig()
 	if data := s.TransportData(); len(data) > 0 {
 		if err := json.Unmarshal(data, &cfg); err != nil {
@@ -46,8 +55,6 @@ func buildRuntime(
 		return nil, err
 	}
 
-	eff := s.Advanced.Effective(telemostDefaults)
-
 	boot, err := bootstrap(ctx, &cfg)
 	if err != nil {
 		return nil, err
@@ -55,30 +62,13 @@ func buildRuntime(
 	logger.Info("telemost: peer_id=", boot.info.PeerID, " room_id=", boot.info.RoomID)
 	logger.Info("telemost: media_server=", boot.info.MediaServerURL)
 
-	vp8Opts := vp8.PipeOptions{SendDelayMs: eff.VP8SendDelayMs}
-	logger.Info("telemost: vp8 send delay = ", eff.VP8SendDelayMs, "ms")
+	session := NewSession(&cfg, boot, logger, SessionOptions{
+		VP8SendDelayMs: eff.Int("vp8_send_delay_ms", 50),
+		ReliableWindow: eff.Int("reliable_window", 2),
+		ReliableChunk:  eff.Int("reliable_chunk", 1000),
+	})
 
-	telePipe := NewPipe(&cfg, boot, logger, vp8Opts)
-
-	if err := telePipe.Start(ctx); err != nil {
-		return nil, err
-	}
-
-	tunnel := telePipe.Tunnel()
-	if tunnel == nil {
-		return nil, errors.New("telemost: vp8 tunnel not created")
-	}
-	logger.Info("telemost: vp8 tunnel attached")
-
-	kcp := vp8.NewKCPPipe(tunnel, eff.VP8SendDelayMs)
-	if err := kcp.Start(ctx); err != nil {
-		return nil, err
-	}
-
-	rt := app.NewRuntime(kcp, nil, nil)
-	rt.MuxConfig = app.MuxConfig{
-		FlushMs:        eff.MuxFlushMs,
-		FlushThreshold: eff.MuxFlushThreshold,
-	}
-	return rt, nil
+	return &app.BuildResult{
+		Transport: session,
+	}, nil
 }

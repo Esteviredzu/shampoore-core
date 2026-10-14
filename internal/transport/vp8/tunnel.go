@@ -21,13 +21,15 @@ const (
 
 	keepaliveInterval = 200 * time.Millisecond
 
+	writeSampleTimeout = 2 * time.Second
+
 	vp8HeaderSize = 10
 
 	vp8MaxPayload = (1 << 19) - 1 - 7
+
+	incomingBufferSize = 1024
 )
 
-// keepaliveSample — padded keepalive, того же размера что data (~1000 байт).
-// Без постоянного трафика SFU не публикует видеотрек другим участникам.
 var keepaliveSample = makeKeepalive()
 
 func makeKeepalive() []byte {
@@ -83,7 +85,7 @@ func NewTunnel(pubPC, subPC *webrtc.PeerConnection) (*Tunnel, error) {
 func AttachTunnel(pubPC, subPC *webrtc.PeerConnection, track *webrtc.TrackLocalStaticSample) (*Tunnel, error) {
 	t := &Tunnel{
 		pubTrack: track,
-		incoming: make(chan []byte, 256),
+		incoming: make(chan []byte, incomingBufferSize),
 		errors:   make(chan error, 1),
 		subReady: make(chan struct{}),
 		closed:   make(chan struct{}),
@@ -120,7 +122,7 @@ func drainTrack(remote *webrtc.TrackRemote) {
 	}
 }
 
-func (t *Tunnel) WriteSample(data []byte) error {
+func (t *Tunnel) writeSample(data []byte) error {
 	select {
 	case <-t.closed:
 		return errors.New("vp8: tunnel closed")
@@ -133,13 +135,28 @@ func (t *Tunnel) WriteSample(data []byte) error {
 
 	wrapped := wrapVP8Keyframe(data)
 
-	t.writeMu.Lock()
-	defer t.writeMu.Unlock()
-	err := t.pubTrack.WriteSample(media.Sample{Data: wrapped, Duration: frameDur})
-	if err == nil {
-		t.lastWriteAt.Store(time.Now().UnixNano())
+	done := make(chan error, 1)
+	go func() {
+		t.writeMu.Lock()
+		defer t.writeMu.Unlock()
+		done <- t.pubTrack.WriteSample(media.Sample{Data: wrapped, Duration: frameDur})
+	}()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.lastWriteAt.Store(time.Now().UnixNano())
+		}
+		return err
+	case <-time.After(writeSampleTimeout):
+		return errors.New("vp8: write sample timeout")
+	case <-t.closed:
+		return errors.New("vp8: tunnel closed")
 	}
-	return err
+}
+
+func (t *Tunnel) WriteSample(data []byte) error {
+	return t.writeSample(data)
 }
 
 func (t *Tunnel) keepaliveLoop(ctx context.Context) {
@@ -164,13 +181,7 @@ func (t *Tunnel) keepaliveLoop(ctx context.Context) {
 				continue
 			}
 
-			t.writeMu.Lock()
-			_ = t.pubTrack.WriteSample(media.Sample{
-				Data:     keepaliveSample,
-				Duration: frameDur,
-			})
-			t.lastWriteAt.Store(time.Now().UnixNano())
-			t.writeMu.Unlock()
+			_ = t.writeSample(keepaliveSample)
 		}
 	}
 }
@@ -262,6 +273,18 @@ func unwrapVP8Keyframe(data []byte) []byte {
 	return payload
 }
 
+func isKeepalive(data []byte) bool {
+	if len(data) < 32 {
+		return false
+	}
+	for i := 0; i < 32; i++ {
+		if data[i] != 0 {
+			return false
+		}
+	}
+	return true
+}
+
 func (t *Tunnel) readLoop(remote *webrtc.TrackRemote) {
 	var vp8 codecs.VP8Packet
 	var frame []byte
@@ -271,6 +294,12 @@ func (t *Tunnel) readLoop(remote *webrtc.TrackRemote) {
 	var totalFrames int
 
 	for {
+		select {
+		case <-t.closed:
+			return
+		default:
+		}
+
 		pkt, _, err := remote.ReadRTP()
 		if err != nil {
 			return
@@ -316,9 +345,14 @@ func (t *Tunnel) readLoop(remote *webrtc.TrackRemote) {
 			continue
 		}
 
+		if isKeepalive(unwrapped) {
+			continue
+		}
+
 		select {
 		case t.incoming <- unwrapped:
-		default:
+		case <-t.closed:
+			return
 		}
 	}
 }

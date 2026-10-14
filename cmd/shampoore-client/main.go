@@ -56,7 +56,7 @@ func main() {
 	}
 
 	if s.SOCKS5Enabled() {
-		srv := socks5.NewLocalServer(s.SOCKS5.Listen, mux, lg, s.SOCKS5.IPv4Only)
+		srv := socks5.NewLocalServer(s.SOCKS5.Listen, mux, lg, app.IPv4Only)
 		go func() {
 			if err := srv.ListenAndServe(ctx); err != nil {
 				log.Printf("socks5 stopped: %v", err)
@@ -78,7 +78,7 @@ func main() {
 			DNSServers:  s.TUN.DNSServers,
 		}
 
-		muxproxy.SetMux(mux)
+		muxproxy.SetMux(mux, app.IPv4Only)
 
 		go func() {
 			if err := runtime.StartTUN(ctx, tunCfg, mux); err != nil {

@@ -25,13 +25,14 @@ type Settings struct {
 
 	Advanced Advanced `json:"advanced,omitempty"`
 
+	IPv4Only bool `json:"-"`
+
 	transportKind string
 	transportData json.RawMessage
 }
 
 type SOCKS5Config struct {
-	Listen   string `json:"listen,omitempty"`
-	IPv4Only bool   `json:"ipv4_only,omitempty"`
+	Listen string `json:"listen,omitempty"`
 }
 
 type TUNConfig struct {
@@ -78,7 +79,10 @@ func (s *Settings) UnmarshalJSON(data []byte) error {
 		_ = json.Unmarshal(v, &tmp.TUN)
 	}
 	if v, ok := raw["advanced"]; ok {
-		_ = json.Unmarshal(v, &tmp.Advanced)
+		var adv Values
+		if err := json.Unmarshal(v, &adv); err == nil {
+			tmp.Advanced = adv
+		}
 	}
 
 	*s = Settings(tmp)
@@ -113,6 +117,9 @@ func (s *Settings) validate() error {
 
 	if s.transportKind == "" {
 		s.transportKind = "yandex"
+	}
+	if s.Advanced == nil {
+		s.Advanced = NewValues()
 	}
 
 	if s.SOCKS5.Listen == "" {

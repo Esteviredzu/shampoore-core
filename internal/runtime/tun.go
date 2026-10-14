@@ -15,7 +15,6 @@ import (
 	"github.com/xjasonlyu/tun2socks/v2/engine"
 
 	"github.com/Esteviredzu/shampoore-core/internal/multiplexing"
-	"github.com/Esteviredzu/shampoore-core/internal/runtime/muxproxy"
 )
 
 const (
@@ -108,7 +107,8 @@ func StartTUN(ctx context.Context, cfg TUNConfig, m multiplexing.StreamMultiplex
 	}
 	defer cleanup()
 
-	muxproxy.SetMux(m)
+	// muxproxy уже настроен через muxproxy.SetMux в cmd/*/main.go
+	_ = m
 
 	key := &engine.Key{
 		Device:   fmt.Sprintf("fd://%d", fd),

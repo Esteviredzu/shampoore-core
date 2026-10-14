@@ -1,25 +1,12 @@
 package app
 
 import (
-	"encoding/json"
 	"fmt"
 	"net/url"
 	"strings"
 )
 
 const URLScheme = "shampoore"
-
-type URLCodec interface {
-	Kind() string
-	Encode(s *Settings, q url.Values) error
-	Decode(q url.Values) (json.RawMessage, error)
-}
-
-var urlCodecs = map[string]URLCodec{}
-
-func RegisterURLCodec(c URLCodec) {
-	urlCodecs[c.Kind()] = c
-}
 
 func ParseSource(src string) (*Settings, error) {
 	if strings.HasPrefix(src, URLScheme+"://") {
@@ -42,9 +29,12 @@ func ParseURL(raw string) (*Settings, error) {
 		return nil, fmt.Errorf("app: shampoore url missing transport kind")
 	}
 
-	codec, ok := urlCodecs[kind]
+	d, ok := DescriptorFor(kind)
 	if !ok {
 		return nil, fmt.Errorf("app: unknown transport kind %q", kind)
+	}
+	if d.DecodeURL == nil {
+		return nil, fmt.Errorf("app: transport %q does not support URL parsing", kind)
 	}
 
 	q := u.Query()
@@ -57,7 +47,7 @@ func ParseURL(raw string) (*Settings, error) {
 		s.Name = u.Fragment
 	}
 
-	data, err := codec.Decode(q)
+	data, err := d.DecodeURL(q)
 	if err != nil {
 		return nil, fmt.Errorf("app: decode transport %q: %w", kind, err)
 	}
@@ -75,9 +65,12 @@ func EncodeURL(s *Settings) (string, error) {
 		return "", fmt.Errorf("app: transport kind not set")
 	}
 
-	codec, ok := urlCodecs[kind]
+	d, ok := DescriptorFor(kind)
 	if !ok {
 		return "", fmt.Errorf("app: unknown transport kind %q", kind)
+	}
+	if d.EncodeURL == nil {
+		return "", fmt.Errorf("app: transport %q does not support URL encoding", kind)
 	}
 
 	q := url.Values{}
@@ -85,7 +78,7 @@ func EncodeURL(s *Settings) (string, error) {
 		q.Set("pw", s.EncryptionPassword)
 	}
 
-	if err := codec.Encode(s, q); err != nil {
+	if err := d.EncodeURL(s.TransportData(), q); err != nil {
 		return "", fmt.Errorf("app: encode transport %q: %w", kind, err)
 	}
 

@@ -7,28 +7,28 @@ import (
 	"github.com/Esteviredzu/shampoore-core/internal/logging"
 )
 
-type Builder func(
-	ctx context.Context,
-	s *Settings,
-	role string,
-	logger logging.ContextLogger,
-) (*Runtime, error)
-
-var registry = map[string]Builder{}
-
-func RegisterTransport(kind string, b Builder) {
-	registry[kind] = b
-}
-
 func BuildRuntime(
 	ctx context.Context,
 	s *Settings,
 	role string,
 	logger logging.ContextLogger,
 ) (*Runtime, error) {
-	builder, ok := registry[s.TransportKind()]
+	d, ok := DescriptorFor(s.TransportKind())
 	if !ok {
 		return nil, fmt.Errorf("app: unknown transport %q", s.TransportKind())
 	}
-	return builder(ctx, s, role, logger)
+
+	eff := d.Defaults.Merge(s.Advanced)
+
+	res, err := d.Build(ctx, s, role, logger, eff)
+	if err != nil {
+		return nil, err
+	}
+
+	rt := NewRuntime(res.Transport, res.BypassHosts, res.Side)
+	rt.MuxConfig = MuxConfig{
+		FlushMs:        eff.Int("mux_flush_ms", 20),
+		FlushThreshold: eff.Int("mux_flush_threshold", 12000),
+	}
+	return rt, nil
 }

@@ -4,29 +4,9 @@ import (
 	"encoding/json"
 	"errors"
 	"net/url"
-
-	"github.com/Esteviredzu/shampoore-core/internal/app"
 )
 
-type urlCodec struct{}
-
-func (urlCodec) Kind() string { return "yandex" }
-
-func (urlCodec) Encode(s *app.Settings, q url.Values) error {
-	cfg := DefaultConfig()
-	if data := s.TransportData(); len(data) > 0 {
-		if err := json.Unmarshal(data, &cfg); err != nil {
-			return err
-		}
-	}
-
-	if cfg.Hash != "" {
-		q.Set("hash", cfg.Hash)
-	}
-	return nil
-}
-
-func (urlCodec) Decode(q url.Values) (json.RawMessage, error) {
+func decodeURL(q url.Values) (json.RawMessage, error) {
 	hash := q.Get("hash")
 	if hash == "" {
 		return nil, errors.New("yandex: missing hash")
@@ -37,6 +17,15 @@ func (urlCodec) Decode(q url.Values) (json.RawMessage, error) {
 	return json.Marshal(map[string]any{"hash": hash})
 }
 
-func init() {
-	app.RegisterURLCodec(urlCodec{})
+func encodeURL(raw json.RawMessage, q url.Values) error {
+	cfg := DefaultConfig()
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, &cfg); err != nil {
+			return err
+		}
+	}
+	if cfg.Hash != "" {
+		q.Set("hash", cfg.Hash)
+	}
+	return nil
 }

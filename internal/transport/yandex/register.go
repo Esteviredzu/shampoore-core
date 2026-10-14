@@ -12,29 +12,40 @@ import (
 )
 
 func init() {
-	app.RegisterTransport("yandex", buildRuntime)
+	defaults := app.Values{
+		"mux_flush_ms":        20,
+		"mux_flush_threshold": 12000,
+
+		"reliable_window": 64,
+		"reliable_chunk":  0,
+
+		"padding_enabled": true,
+		"padding_target":  14000,
+
+		"jitter_min_ms": 0,
+		"jitter_max_ms": 0,
+	}
+
+	err := app.RegisterDescriptor(app.Descriptor{
+		Kind:        "yandex",
+		DisplayName: "Yandex Board",
+		Defaults:    defaults,
+		DecodeURL:   decodeURL,
+		EncodeURL:   encodeURL,
+		Build:       buildTransport,
+	})
+	if err != nil {
+		panic(err)
+	}
 }
 
-var yandexDefaults = app.TransportDefaults{
-	MuxFlushMs:        20,
-	MuxFlushThreshold: 12000,
-
-	ReliableWindow: 64,
-	ReliableChunk:  0,
-
-	PaddingEnabled: true,
-	PaddingTarget:  14000,
-
-	JitterMinMs: 0,
-	JitterMaxMs: 0,
-}
-
-func buildRuntime(
+func buildTransport(
 	ctx context.Context,
 	s *app.Settings,
 	role string,
 	logger logging.ContextLogger,
-) (*app.Runtime, error) {
+	eff app.Values,
+) (*app.BuildResult, error) {
 	cfg := DefaultConfig()
 	if data := s.TransportData(); len(data) > 0 {
 		if err := json.Unmarshal(data, &cfg); err != nil {
@@ -44,8 +55,6 @@ func buildRuntime(
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
-
-	eff := s.Advanced.Effective(yandexDefaults)
 
 	creds, err := Bootstrap(ctx, cfg.Hash, cfg.ParticipantName)
 	if err != nil {
@@ -78,13 +87,14 @@ func buildRuntime(
 
 	var pipe transport.Pipe = NewYandexPipe(client, logger, pipeCfg)
 
-	if eff.PaddingEnabled {
-		pp, err := security.NewPaddingPipe(pipe, eff.PaddingTarget)
+	if eff.Bool("padding_enabled", true) {
+		target := eff.Int("padding_target", 14000)
+		pp, err := security.NewPaddingPipe(pipe, target)
 		if err != nil {
 			return nil, err
 		}
 		pipe = pp
-		logger.Info("yandex: padding enabled; target=", eff.PaddingTarget)
+		logger.Info("yandex: padding enabled; target=", target)
 	}
 
 	if s.EncryptionPassword != "" {
@@ -96,16 +106,16 @@ func buildRuntime(
 		logger.Info("yandex: encryption enabled")
 	}
 
-	if eff.JitterMaxMs > 0 {
-		minD := time.Duration(eff.JitterMinMs) * time.Millisecond
-		maxD := time.Duration(eff.JitterMaxMs) * time.Millisecond
+	if eff.Int("jitter_max_ms", 0) > 0 {
+		minD := eff.Duration("jitter_min_ms", 0)
+		maxD := eff.Duration("jitter_max_ms", 0)
 		pipe = security.NewJitterPipe(pipe, minD, maxD)
 		logger.Info("yandex: jitter enabled")
 	}
 
 	session, err := transport.NewReliableSession(pipe, logger, transport.Config{
-		Window:    eff.ReliableWindow,
-		ChunkSize: eff.ReliableChunk,
+		Window:    eff.Int("reliable_window", 64),
+		ChunkSize: eff.Int("reliable_chunk", 0),
 	})
 	if err != nil {
 		return nil, err
@@ -127,10 +137,9 @@ func buildRuntime(
 		sides = append(sides, NewCleanupWorker(creds, logger, workerCfg))
 	}
 
-	rt := app.NewRuntime(session, bypass, sides)
-	rt.MuxConfig = app.MuxConfig{
-		FlushMs:        eff.MuxFlushMs,
-		FlushThreshold: eff.MuxFlushThreshold,
-	}
-	return rt, nil
+	return &app.BuildResult{
+		Transport:   session,
+		BypassHosts: bypass,
+		Side:        sides,
+	}, nil
 }

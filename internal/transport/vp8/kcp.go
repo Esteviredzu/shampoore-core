@@ -6,18 +6,12 @@ import (
 	"time"
 )
 
-// KCPPipe — прокси поверх VP8-туннеля. Настоящий KCP здесь НЕ используется,
-// несмотря на название. Внутри: 4-байтовый BE префикс длины + pacing.
 type KCPPipe struct {
 	tunnel    *Tunnel
 	sendDelay time.Duration
+	sessionID string
 
-	mu     sync.Mutex
-	closed bool
-
-	ctx    context.Context
-	cancel context.CancelFunc
-	wg     sync.WaitGroup
+	stopOnce sync.Once
 }
 
 func NewKCPPipe(tunnel *Tunnel, sendDelayMs int) *KCPPipe {
@@ -25,79 +19,39 @@ func NewKCPPipe(tunnel *Tunnel, sendDelayMs int) *KCPPipe {
 	if sendDelayMs > 0 {
 		d = time.Duration(sendDelayMs) * time.Millisecond
 	}
-	return &KCPPipe{tunnel: tunnel, sendDelay: d}
+	return &KCPPipe{
+		tunnel:    tunnel,
+		sendDelay: d,
+		sessionID: "vp8-kcp",
+	}
 }
 
-func (k *KCPPipe) Start(ctx context.Context) error {
-	k.mu.Lock()
-	if k.ctx != nil {
-		k.mu.Unlock()
-		return nil
-	}
-	k.ctx, k.cancel = context.WithCancel(ctx)
-	k.mu.Unlock()
-	return nil
+func (k *KCPPipe) Start(_ context.Context) error { return nil }
+
+func (k *KCPPipe) Stop(_ context.Context) error {
+	var err error
+	k.stopOnce.Do(func() { err = k.tunnel.Close() })
+	return err
 }
 
-func (k *KCPPipe) Stop(ctx context.Context) error {
-	k.mu.Lock()
-	if k.closed {
-		k.mu.Unlock()
-		return nil
-	}
-	k.closed = true
-	cancel := k.cancel
-	k.mu.Unlock()
-
-	if cancel != nil {
-		cancel()
-	}
-	k.wg.Wait()
-	return nil
-}
-
-func (k *KCPPipe) Send(ctx context.Context, data []byte) error {
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	default:
-	}
-
-	if k.sendDelay > 0 {
+func (k *KCPPipe) SendMessage(ctx context.Context, data []byte, _ string) error {
+	// Pacing только для data-чанков. ACK'и (67 байт) идут без паузы,
+	// иначе они застревают в очереди SFU на секунды.
+	if k.sendDelay > 0 && len(data) > 200 {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-time.After(k.sendDelay):
 		}
 	}
-
-	packet := make([]byte, 4+len(data))
-	packet[0] = byte(len(data) >> 24)
-	packet[1] = byte(len(data) >> 16)
-	packet[2] = byte(len(data) >> 8)
-	packet[3] = byte(len(data))
-	copy(packet[4:], data)
-
-	return k.tunnel.WriteSample(packet)
+	return k.tunnel.WriteSample(data)
 }
 
-func (k *KCPPipe) Receive(ctx context.Context) ([]byte, error) {
-	for {
-		raw, err := k.tunnel.Receive(ctx)
-		if err != nil {
-			return nil, err
-		}
-		if len(raw) < 4 {
-			continue
-		}
-
-		length := int(raw[0])<<24 | int(raw[1])<<16 | int(raw[2])<<8 | int(raw[3])
-		if length <= 0 || length > len(raw)-4 {
-			continue
-		}
-
-		out := make([]byte, length)
-		copy(out, raw[4:4+length])
-		return out, nil
-	}
+func (k *KCPPipe) ReceiveMessage(ctx context.Context) ([]byte, error) {
+	return k.tunnel.Receive(ctx)
 }
+
+func (k *KCPPipe) DeleteMessage(_ context.Context, _ string) error { return nil }
+
+func (k *KCPPipe) SessionID() string   { return k.sessionID }
+func (k *KCPPipe) MaxMessageSize() int { return 16000 }

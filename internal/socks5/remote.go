@@ -23,6 +23,7 @@ type RemoteHandler struct {
 	mux       multiplexing.StreamMultiplexer
 	logger    logging.ContextLogger
 	chunkSize int
+	ipv4Only  bool
 
 	mu      sync.Mutex
 	streams map[multiplexing.Stream]struct{}
@@ -37,6 +38,7 @@ func NewRemoteHandler(
 	m multiplexing.StreamMultiplexer,
 	logger logging.ContextLogger,
 	chunkSize int,
+	ipv4Only bool,
 ) *RemoteHandler {
 	if chunkSize <= 0 {
 		chunkSize = 8000
@@ -46,6 +48,7 @@ func NewRemoteHandler(
 		mux:       m,
 		logger:    logger,
 		chunkSize: chunkSize,
+		ipv4Only:  ipv4Only,
 		streams:   make(map[multiplexing.Stream]struct{}),
 		ctx:       sctx,
 		cancel:    cancel,
@@ -107,18 +110,24 @@ func (s *RemoteHandler) handleStream(stream multiplexing.Stream) {
 		port = int(v)
 	}
 
-	ipv4Only, _ := meta["ipv4_only"].(bool)
-
 	if host == "" || port == 0 {
 		s.logger.Warn("remote: ", streamID, " invalid metadata")
 		stream.Close()
 		return
 	}
 
+	if s.ipv4Only {
+		if ip := net.ParseIP(host); ip != nil && ip.To4() == nil {
+			s.logger.Warn("remote: ", streamID, " ipv6 destination rejected: ", host)
+			stream.Close()
+			return
+		}
+	}
+
 	target := net.JoinHostPort(host, strconv.Itoa(port))
 	s.logger.Info("remote: ", streamID, " -> ", target)
 
-	conn, err := dialTCP(target, ipv4Only)
+	conn, err := dialTCP(target, s.ipv4Only)
 	if err != nil {
 		s.logger.Warn("remote: ", streamID, " connect failed: ", err)
 		stream.Close()
@@ -133,11 +142,21 @@ func (s *RemoteHandler) handleStream(stream multiplexing.Stream) {
 		s.logger.Debug("remote: ", streamID, " closed")
 	}()
 
-	var wg sync.WaitGroup
-	wg.Add(2)
+	// Разблокировка conn.Read при отмене контекста (Stop).
+	stopWatch := make(chan struct{})
+	go func() {
+		select {
+		case <-s.ctx.Done():
+			conn.Close()
+		case <-stopWatch:
+		}
+	}()
+	defer close(stopWatch)
+
+	done := make(chan struct{}, 2)
 
 	go func() {
-		defer wg.Done()
+		defer func() { done <- struct{}{} }()
 		buf := make([]byte, s.chunkSize)
 		for {
 			n, err := conn.Read(buf)
@@ -153,7 +172,7 @@ func (s *RemoteHandler) handleStream(stream multiplexing.Stream) {
 	}()
 
 	go func() {
-		defer wg.Done()
+		defer func() { done <- struct{}{} }()
 		buf := make([]byte, s.chunkSize)
 		for {
 			n, err := stream.Read(buf)
@@ -168,5 +187,5 @@ func (s *RemoteHandler) handleStream(stream multiplexing.Stream) {
 		}
 	}()
 
-	wg.Wait()
+	<-done
 }

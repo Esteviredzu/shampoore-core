@@ -13,10 +13,14 @@ import (
 	"github.com/Esteviredzu/shampoore-core/internal/multiplexing"
 )
 
-var defaultMux multiplexing.StreamMultiplexer
+var (
+	defaultMux multiplexing.StreamMultiplexer
+	defaultV4  bool = true
+)
 
-func SetMux(m multiplexing.StreamMultiplexer) {
+func SetMux(m multiplexing.StreamMultiplexer, ipv4Only bool) {
 	defaultMux = m
+	defaultV4 = ipv4Only
 }
 
 type MuxProxy struct{}
@@ -34,6 +38,12 @@ func (p *MuxProxy) DialContext(ctx context.Context, meta *M.Metadata) (net.Conn,
 	port, err := strconv.Atoi(portStr)
 	if err != nil {
 		return nil, fmt.Errorf("muxproxy: parse port: %w", err)
+	}
+
+	if defaultV4 {
+		if ip := net.ParseIP(host); ip != nil && ip.To4() == nil {
+			return nil, fmt.Errorf("muxproxy: ipv6 rejected: %s", host)
+		}
 	}
 
 	stream, err := defaultMux.OpenStream(ctx, map[string]any{

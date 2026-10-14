@@ -68,7 +68,7 @@ func main() {
 		log.Fatalf("runtime start: %v", err)
 	}
 
-	handler := socks5.NewRemoteHandler(ctx, mux, lg, 8000)
+	handler := socks5.NewRemoteHandler(ctx, mux, lg, 8000, app.IPv4Only)
 	go func() {
 		if err := handler.Run(); err != nil {
 			log.Printf("handler stopped: %v", err)
