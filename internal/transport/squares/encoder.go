@@ -56,8 +56,8 @@ func (e *Encoder) start() error {
 		"-lag-in-frames", "0",
 		"-auto-alt-ref", "0",
 		"-error-resilient", "1",
-		"-g", "30",           // keyframe раз в 30 кадров (~1 c при 30 fps)
-		"-sc_threshold", "0", // отключить scenecut: keyframe строго по GOP
+		"-g", "30",
+		"-sc_threshold", "0",
 		"-an",
 		"-threads", "1",
 		"-flush_packets", "1",
