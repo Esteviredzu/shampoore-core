@@ -1,7 +1,6 @@
 package squares
 
 import (
-	"bytes"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -10,17 +9,28 @@ import (
 	"os"
 	"os/exec"
 	"sync"
+	"time"
 )
 
 type Decoder struct {
 	width, height int
 	fps           int
-	batchSize     int
-	maxPending    int
-	mu           sync.Mutex
-	pending      [][]byte
-	decodedQueue [][]byte
-	closed       bool
+
+	mu        sync.Mutex
+	cmd       *exec.Cmd
+	stdin     io.WriteCloser
+	stdout    io.ReadCloser
+	frameCh   chan []byte
+	errCh     chan error
+	closed    bool
+	dumped    bool
+	statsIn   int
+	statsOut  int
+
+	needKey  bool
+	frameIdx uint64
+
+	closeOnce sync.Once
 }
 
 func NewDecoder(width, height, fps int) (*Decoder, error) {
@@ -30,42 +40,102 @@ func NewDecoder(width, height, fps int) (*Decoder, error) {
 	if fps <= 0 {
 		fps = 30
 	}
-	return &Decoder{
-		width:      width,
-		height:     height,
-		fps:        fps,
-		batchSize:  5,
-		maxPending: 15,
-	}, nil
+	d := &Decoder{
+		width:   width,
+		height:  height,
+		fps:     fps,
+		frameCh: make(chan []byte, 4),
+		errCh:   make(chan error, 1),
+		needKey: true,
+	}
+	if err := d.start(); err != nil {
+		return nil, err
+	}
+	return d, nil
 }
 
-func (d *Decoder) Decode(vp8Frame []byte) ([]byte, error) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	if d.closed {
-		return nil, errors.New("squares/decoder: closed")
+func (d *Decoder) start() error {
+	// Минимальные флаги, как в squares/download/main.go, где ffmpeg
+	// работает. Не добавляем nobuffer/direct/low_delay — они могут
+	// отбрасывать первые кадры.
+	cmd := exec.Command("ffmpeg",
+		"-loglevel", "error",
+		"-f", "ivf", "-i", "-",
+		"-f", "rawvideo", "-pix_fmt", "rgb24", "-",
+	)
+	cmd.Stderr = os.Stderr
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return fmt.Errorf("squares/decoder: stdin: %w", err)
 	}
-	d.pending = append(d.pending, vp8Frame)
-	if len(d.decodedQueue) == 0 &&
-		(len(d.pending) >= d.batchSize || len(d.pending) >= d.maxPending) {
-		batch := d.pending
-		d.pending = nil
-		rgbs, err := d.decodeBatch(batch)
-		if err != nil {
-			log.Printf("[squares/decoder] batch decode error (batch=%d): %v",
-				len(batch), err)
-			return nil, err
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return fmt.Errorf("squares/decoder: stdout: %w", err)
+	}
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("squares/decoder: start: %w", err)
+	}
+	d.cmd = cmd
+	d.stdin = stdin
+	d.stdout = stdout
+
+	if err := d.writeIVFHeader(); err != nil {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		return err
+	}
+
+	go d.readLoop()
+	return nil
+}
+
+// IVF-заголовок — ровно как в squares/download/main.go, frame_count = 0.
+func (d *Decoder) writeIVFHeader() error {
+	h := make([]byte, 32)
+	copy(h[0:4], "DKIF")
+	binary.LittleEndian.PutUint16(h[6:8], 32)
+	copy(h[8:12], "VP80")
+	binary.LittleEndian.PutUint32(h[16:20], uint32(d.fps))
+	binary.LittleEndian.PutUint32(h[20:24], 1)
+	_, err := d.stdin.Write(h)
+	if err != nil {
+		log.Printf("[squares/decoder] write IVF header failed: %v", err)
+	}
+	return err
+}
+
+func (d *Decoder) readLoop() {
+	frameSize := d.width * d.height * 3
+	defer func() {
+		close(d.frameCh)
+		close(d.errCh)
+	}()
+	for {
+		rgb := make([]byte, frameSize)
+		if _, err := io.ReadFull(d.stdout, rgb); err != nil {
+			log.Printf("[squares/decoder] readLoop exit after %d frames: %v",
+				d.statsOut, err)
+			select {
+			case d.errCh <- err:
+			default:
+			}
+			return
 		}
-		if len(rgbs) > 0 {
-			d.decodedQueue = rgbs
+		d.mu.Lock()
+		d.statsOut++
+		n := d.statsOut
+		d.mu.Unlock()
+		if n == 1 {
+			log.Printf("[squares/decoder] FIRST RGB frame produced")
+		} else if n%50 == 0 {
+			log.Printf("[squares/decoder] decoded %d frames, ffmpeg keeps up", n)
+		}
+		select {
+		case d.frameCh <- rgb:
+		default:
+			// не тормозим ffmpeg, если мы не успеваем
 		}
 	}
-	if len(d.decodedQueue) == 0 {
-		return nil, nil
-	}
-	rgb := d.decodedQueue[0]
-	d.decodedQueue = d.decodedQueue[1:]
-	return rgb, nil
 }
 
 func isVP8Keyframe(data []byte) bool {
@@ -75,82 +145,117 @@ func isVP8Keyframe(data []byte) bool {
 	return (data[0] & 0x01) == 0
 }
 
-func (d *Decoder) decodeBatch(frames [][]byte) ([][]byte, error) {
-	// С -g 1 каждый кадр — это keyframe.
-	// Если WebRTC потерял RTP-пакет, кадр будет битым.
-	// ffmpeg libvpx может закрашиться, если скормить ему битый keyframe.
-	// Поэтому мы фильтруем: пропускаем всё, что не является keyframe.
-	// KCP всё равно запросит ретрансмит потерянных данных.
-	var validFrames [][]byte
-	for _, f := range frames {
-		if isVP8Keyframe(f) {
-			validFrames = append(validFrames, f)
-		}
-	}
-	if len(validFrames) == 0 {
-		return nil, nil
-	}
-
-	var buf bytes.Buffer
+// dumpFirstFrame — вспомогательная диагностика: сохраняет первый
+// VP8-кадр в /tmp/decoder_first_frame.ivf, чтобы вручную проверить:
+//   ffmpeg -f ivf -i /tmp/decoder_first_frame.ivf -f rawvideo -pix_fmt rgb24 /tmp/out.rgb
+// Если этот вызов отработает — формат верный, ищем проблему в коде.
+// Если нет — VP8-данные из туннеля битые.
+func (d *Decoder) dumpFirstFrame(vp8Frame []byte) {
 	h := make([]byte, 32)
 	copy(h[0:4], "DKIF")
-	binary.LittleEndian.PutUint16(h[4:6], 0)
 	binary.LittleEndian.PutUint16(h[6:8], 32)
 	copy(h[8:12], "VP80")
 	binary.LittleEndian.PutUint16(h[12:14], uint16(d.width))
 	binary.LittleEndian.PutUint16(h[14:16], uint16(d.height))
 	binary.LittleEndian.PutUint32(h[16:20], uint32(d.fps))
 	binary.LittleEndian.PutUint32(h[20:24], 1)
-	binary.LittleEndian.PutUint32(h[24:28], uint32(len(validFrames)))
-	buf.Write(h)
-	for i, f := range validFrames {
-		fh := make([]byte, 12)
-		binary.LittleEndian.PutUint32(fh[0:4], uint32(len(f)))
-		binary.LittleEndian.PutUint64(fh[4:12], uint64(i))
-		buf.Write(fh)
-		buf.Write(f)
+	binary.LittleEndian.PutUint32(h[24:28], 1)
+
+	fh := make([]byte, 12)
+	binary.LittleEndian.PutUint32(fh[0:4], uint32(len(vp8Frame)))
+
+	full := make([]byte, 0, len(h)+len(fh)+len(vp8Frame))
+	full = append(full, h...)
+	full = append(full, fh...)
+	full = append(full, vp8Frame...)
+
+	path := "/tmp/decoder_first_frame.ivf"
+	if err := os.WriteFile(path, full, 0644); err != nil {
+		log.Printf("[squares/decoder] dump first frame: %v", err)
+		return
 	}
-	cmd := exec.Command("ffmpeg",
-		"-loglevel", "error",
-		"-err_detect", "ignore_err",
-		"-fflags", "+discardcorrupt",
-		"-f", "ivf",
-		"-i", "-",
-		"-f", "rawvideo",
-		"-pix_fmt", "rgb24",
-		"-an",
-		"-",
-	)
-	cmd.Stdin = bytes.NewReader(buf.Bytes())
-	cmd.Stderr = os.Stderr
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return nil, fmt.Errorf("squares/decoder: stdout: %w", err)
+	log.Printf("[squares/decoder] first VP8 frame (%d B) dumped to %s — проверить: ffmpeg -f ivf -i %s -f null -",
+		len(vp8Frame), path, path)
+}
+
+func (d *Decoder) Decode(vp8Frame []byte) ([]byte, error) {
+	d.mu.Lock()
+	if d.closed {
+		d.mu.Unlock()
+		return nil, errors.New("squares/decoder: closed")
 	}
-	if err := cmd.Start(); err != nil {
-		return nil, fmt.Errorf("squares/decoder: start: %w", err)
-	}
-	frameSize := d.width * d.height * 3
-	var rgbs [][]byte
-	for {
-		rgb := make([]byte, frameSize)
-		_, err := io.ReadFull(stdout, rgb)
-		if err == io.EOF || err == io.ErrUnexpectedEOF {
-			break
+	if d.needKey {
+		if !isVP8Keyframe(vp8Frame) {
+			d.mu.Unlock()
+			return nil, nil
 		}
-		if err != nil {
-			_ = cmd.Wait()
-			return rgbs, fmt.Errorf("squares/decoder: read rgb: %w", err)
-		}
-		rgbs = append(rgbs, rgb)
+		d.needKey = false
 	}
-	_ = cmd.Wait()
-	return rgbs, nil
+
+	d.statsIn++
+	inN := d.statsIn
+	if inN <= 5 || inN%200 == 0 {
+		log.Printf("[squares/decoder] in #%d size=%d (out=%d)",
+			inN, len(vp8Frame), d.statsOut)
+	}
+
+	if !d.dumped {
+		d.dumped = true
+		d.mu.Unlock()
+		d.dumpFirstFrame(vp8Frame)
+		d.mu.Lock()
+	}
+
+	fh := make([]byte, 12)
+	binary.LittleEndian.PutUint32(fh[0:4], uint32(len(vp8Frame)))
+	binary.LittleEndian.PutUint64(fh[4:12], d.frameIdx)
+	d.frameIdx++
+
+	if _, err := d.stdin.Write(fh); err != nil {
+		log.Printf("[squares/decoder] stdin write header err: %v", err)
+		d.needKey = true
+		d.mu.Unlock()
+		return nil, fmt.Errorf("squares/decoder: write header: %w", err)
+	}
+	if _, err := d.stdin.Write(vp8Frame); err != nil {
+		log.Printf("[squares/decoder] stdin write frame err: %v", err)
+		d.needKey = true
+		d.mu.Unlock()
+		return nil, fmt.Errorf("squares/decoder: write frame: %w", err)
+	}
+	d.mu.Unlock()
+
+	// Неблокирующее чтение: если ffmpeg ещё не выдал RGB,
+	// возвращаем nil, а вызывающий пропустит этот кадр.
+	// KCP повторит потерянное, так что ничего не рвётся.
+	select {
+	case rgb, ok := <-d.frameCh:
+		if !ok {
+			return nil, io.EOF
+		}
+		return rgb, nil
+	case err, ok := <-d.errCh:
+		if !ok || err == nil {
+			return nil, io.EOF
+		}
+		return nil, err
+	case <-time.After(150 * time.Millisecond):
+		return nil, nil
+	}
 }
 
 func (d *Decoder) Close() error {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	d.closed = true
+	d.closeOnce.Do(func() {
+		d.mu.Lock()
+		d.closed = true
+		d.mu.Unlock()
+		if d.stdin != nil {
+			_ = d.stdin.Close()
+		}
+		if d.cmd != nil && d.cmd.Process != nil {
+			_ = d.cmd.Process.Kill()
+			_ = d.cmd.Wait()
+		}
+	})
 	return nil
 }

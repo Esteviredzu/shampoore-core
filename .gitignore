@@ -10,6 +10,7 @@ squares-visual
 bin
 speedtest.py
 video.mp4
+song.mp3
 *.log
 
 .vscode/

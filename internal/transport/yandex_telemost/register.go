@@ -17,19 +17,19 @@ func init() {
 		"mux_flush_threshold": 4000,
 
 		"kcp_conv":     0,
-		"kcp_mtu":      390,
-		"kcp_window":   256, // was 128 — best in speedtest (w256_i5_r5 = 8.8 KiB/s vs baseline 4.7)
+		"kcp_mtu":      390,        // НЕ трогаем — крупнее риск фрагментации в SFU
+		"kcp_window":   256,
 		"kcp_nodelay":  1,
 		"kcp_interval": 5,
 		"kcp_resend":   5,
 		"kcp_nc":       true,
 
-		"squares_w":       640,
-		"squares_h":       360,
-		"squares_cols":    40,
-		"squares_rows":    20,
-		"squares_fps":     30,
-		"squares_bitrate": "800K",
+		"squares_w":       960,
+		"squares_h":       640,        // было 544  (40 × 16 = 640)
+		"squares_cols":    60,
+		"squares_rows":    40,         // было 34
+		"squares_fps":     30,         // НЕ трогаем
+		"squares_bitrate": "4000K",
 		"squares_copies":  1,
 	}
 	err := app.RegisterDescriptor(app.Descriptor{
