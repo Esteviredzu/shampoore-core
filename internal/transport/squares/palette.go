@@ -20,4 +20,5 @@ var Palette = [16][3]byte{
 }
 
 
+
 var IdleBG = [3]byte{24, 24, 24}
