@@ -24,6 +24,7 @@ const (
 	sendQueueCap   = 1024
 	enqueueTimeout = 500 * time.Millisecond
 	cellSize       = 16
+)
 
 type Config struct {
 	Width, Height int
@@ -34,15 +35,15 @@ type Config struct {
 }
 
 func DefaultConfig() Config {
-    return Config{
-        Width:   640,
-        Height:  360,
-        Cols:    40,
-        Rows:    20,
-        FPS:     30,
-        Bitrate: "500K",
-        Copies:  2,
-    }
+	return Config{
+		Width:   640,
+		Height:  360,
+		Cols:    40,
+		Rows:    20,
+		FPS:     25,
+		Bitrate: "600K",
+		Copies:  1,
+	}
 }
 
 type Pipe struct {
@@ -182,10 +183,10 @@ func (p *Pipe) Stop(ctx context.Context) error {
 	return nil
 }
 
-func (p *Pipe) SessionID() string                              { return "squares" }
-func (p *Pipe) MaxMessageSize() int                            { return p.maxMessage }
+func (p *Pipe) SessionID() string                                   { return "squares" }
+func (p *Pipe) MaxMessageSize() int                                 { return p.maxMessage }
 func (p *Pipe) DeleteMessage(ctx context.Context, key string) error { return nil }
-func (p *Pipe) SetSharing(on bool)                             { p.sharing = on }
+func (p *Pipe) SetSharing(on bool)                                  { p.sharing = on }
 
 func (p *Pipe) SendMessage(ctx context.Context, data []byte, key string) error {
 	if !p.started {

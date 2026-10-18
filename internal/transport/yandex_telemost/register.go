@@ -18,19 +18,19 @@ func init() {
 
 		"kcp_conv":     0,
 		"kcp_mtu":      390,
-		"kcp_window":   16,    // было 8 → слишком мало для высокого RTT
+		"kcp_window":   256, // was 128 — best in speedtest (w256_i5_r5 = 8.8 KiB/s vs baseline 4.7)
 		"kcp_nodelay":  1,
-		"kcp_interval": 10,    // было 40 → KCP снова видит потери быстро
-		"kcp_resend":   2,
-		"kcp_nc":       true,  // было false → ОТКЛЮЧАЕМ congestion control
+		"kcp_interval": 5,
+		"kcp_resend":   5,
+		"kcp_nc":       true,
 
 		"squares_w":       640,
 		"squares_h":       360,
 		"squares_cols":    40,
 		"squares_rows":    20,
 		"squares_fps":     30,
-		"squares_bitrate": "500K",
-		"squares_copies":  2,
+		"squares_bitrate": "800K",
+		"squares_copies":  1,
 	}
 	err := app.RegisterDescriptor(app.Descriptor{
 		Kind:        "telemost",
@@ -78,9 +78,9 @@ func buildTransport(
 	sqH := eff.Int("squares_h", 360)
 	sqCols := eff.Int("squares_cols", 40)
 	sqRows := eff.Int("squares_rows", 20)
-	sqFPS := eff.Int("squares_fps", 30)
-	sqBitrate := eff.String("squares_bitrate", "500K")
-	sqCopies := eff.Int("squares_copies", 2)
+	sqFPS := eff.Int("squares_fps", 25)
+	sqBitrate := eff.String("squares_bitrate", "600K")
+	sqCopies := eff.Int("squares_copies", 1)
 	cells := sqCols * sqRows
 	payloadBytes := cells / 2
 	maxSeg := payloadBytes - 10
@@ -98,17 +98,18 @@ func buildTransport(
 		" max_msg=", maxSeg,
 		" copies=", sqCopies,
 		" kcp_mtu=", mtu,
-		" kcp_resend=", eff.Int("kcp_resend", 2),
+		" kcp_resend=", eff.Int("kcp_resend", 5),
+		" kcp_interval=", eff.Int("kcp_interval", 5),
 		" kcp_nc=", eff.Bool("kcp_nc", true))
 	useSharing := false
 	logger.Info("telemost: role=", role, " useSharing=", useSharing)
 	session := NewSession(&cfg, boot, logger, SessionOptions{
 		KcpConv:     conv,
 		KcpMTU:      mtu,
-		KcpWindow:   eff.Int("kcp_window", 16),
+		KcpWindow:   eff.Int("kcp_window", 256),
 		KcpNoDelay:  eff.Int("kcp_nodelay", 1),
-		KcpInterval: eff.Int("kcp_interval", 10),
-		KcpResend:   eff.Int("kcp_resend", 2),
+		KcpInterval: eff.Int("kcp_interval", 5),
+		KcpResend:   eff.Int("kcp_resend", 5),
 		KcpNC:       eff.Bool("kcp_nc", true),
 		SquaresWidth:   sqW,
 		SquaresHeight:  sqH,
