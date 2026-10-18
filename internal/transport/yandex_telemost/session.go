@@ -21,13 +21,14 @@ type SessionOptions struct {
 	KcpResend   int
 	KcpNC       bool
 
-	SquaresWidth   int
-	SquaresHeight  int
-	SquaresCols    int
-	SquaresRows    int
-	SquaresFPS     int
-	SquaresBitrate string
-	SquaresCopies  int
+	SquaresWidth    int
+	SquaresHeight   int
+	SquaresCols     int
+	SquaresRows     int
+	SquaresCellSize int // ← NEW
+	SquaresFPS      int
+	SquaresBitrate  string
+	SquaresCopies   int
 
 	UseSharing bool
 }
@@ -38,11 +39,11 @@ type Session struct {
 	logger logging.ContextLogger
 	opts   SessionOptions
 
-	mu      sync.Mutex
-	pipe    *Pipe
-	sqPipe  *squares.Pipe
-	inner   transport.Transport
-	started bool
+	mu       sync.Mutex
+	pipe     *Pipe
+	sqPipe   *squares.Pipe
+	inner    transport.Transport
+	started  bool
 	stopOnce sync.Once
 }
 
@@ -80,13 +81,14 @@ func (s *Session) Start(ctx context.Context) error {
 	s.logger.Info("telemost: vp8 tunnel attached (raw mode)")
 
 	sqCfg := squares.Config{
-		Width:   s.opts.SquaresWidth,
-		Height:  s.opts.SquaresHeight,
-		Cols:    s.opts.SquaresCols,
-		Rows:    s.opts.SquaresRows,
-		FPS:     s.opts.SquaresFPS,
-		Bitrate: s.opts.SquaresBitrate,
-		Copies:  s.opts.SquaresCopies,
+		Width:    s.opts.SquaresWidth,
+		Height:   s.opts.SquaresHeight,
+		Cols:     s.opts.SquaresCols,
+		Rows:     s.opts.SquaresRows,
+		CellSize: s.opts.SquaresCellSize, // ← NEW
+		FPS:      s.opts.SquaresFPS,
+		Bitrate:  s.opts.SquaresBitrate,
+		Copies:   s.opts.SquaresCopies,
 	}
 	sqPipe, err := squares.NewPipe(tunnel, sqCfg)
 	if err != nil {
@@ -102,7 +104,7 @@ func (s *Session) Start(ctx context.Context) error {
 		return err
 	}
 	s.logger.Info("telemost: squares pipe started; grid=",
-		sqCfg.Cols, "x", sqCfg.Rows,
+		sqCfg.Cols, "x", sqCfg.Rows, " cell=", sqCfg.CellSize, "px",
 		" res=", sqCfg.Width, "x", sqCfg.Height,
 		" fps=", sqCfg.FPS,
 		" copies=", sqCfg.Copies,

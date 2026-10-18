@@ -1,4 +1,3 @@
-// FILE: internal/transport/squares/pipe.go
 package squares
 
 import (
@@ -18,17 +17,17 @@ import (
 )
 
 const (
-	hdrLen         = 8
-	recHdr         = 2
-	hdrCells       = 16
 	sendQueueCap   = 1024
 	enqueueTimeout = 500 * time.Millisecond
-	cellSize       = 16
 )
 
+// Config — конфигурация squares-канала. CellSize — размер клетки в пикселях.
+// Ширина/высота кадра, payloadBytes, maxMessage выводятся из
+// (CellSize, Cols, Rows) в NewPipe. Если Width/Height = 0 — авто.
 type Config struct {
 	Width, Height int
 	Cols, Rows    int
+	CellSize      int
 	FPS           int
 	Bitrate       string
 	Copies        int
@@ -36,13 +35,12 @@ type Config struct {
 
 func DefaultConfig() Config {
 	return Config{
-		Width:   640,
-		Height:  360,
-		Cols:    40,
-		Rows:    20,
-		FPS:     25,
-		Bitrate: "600K",
-		Copies:  1,
+		Cols:     60,
+		Rows:     40,
+		CellSize: 16,
+		FPS:      30,
+		Bitrate:  "600K",
+		Copies:   1,
 	}
 }
 
@@ -85,55 +83,50 @@ func NewPipe(tunnel *vp8.Tunnel, cfg Config) (*Pipe, error) {
 	if tunnel == nil {
 		return nil, errors.New("squares: nil tunnel")
 	}
-	if cfg.Width <= 0 {
-		cfg.Width = 384
-	}
-	if cfg.Height <= 0 {
-		cfg.Height = 216
+
+	if cfg.CellSize <= 0 {
+		cfg.CellSize = 16
 	}
 	if cfg.Cols <= 0 {
-		cfg.Cols = 24
+		cfg.Cols = 60
 	}
 	if cfg.Rows <= 0 {
-		cfg.Rows = 9
+		cfg.Rows = 40
+	}
+
+	grid := Grid{CellSize: cfg.CellSize, Cols: cfg.Cols, Rows: cfg.Rows}
+	autoW, autoH, payloadBytes, maxData, maxMessage, err := grid.DeriveLayout()
+	if err != nil {
+		return nil, err
+	}
+	if cfg.Width <= 0 {
+		cfg.Width = autoW
+	}
+	if cfg.Height <= 0 {
+		cfg.Height = autoH
+	}
+	if cfg.Width < cfg.Cols*cfg.CellSize {
+		return nil, fmt.Errorf("squares: frame width %d < active %d",
+			cfg.Width, cfg.Cols*cfg.CellSize)
+	}
+	if cfg.Height < cfg.Rows*cfg.CellSize {
+		return nil, fmt.Errorf("squares: frame height %d < active %d",
+			cfg.Height, cfg.Rows*cfg.CellSize)
 	}
 	if cfg.FPS <= 0 {
 		cfg.FPS = 30
 	}
 	if cfg.Bitrate == "" {
-		cfg.Bitrate = "400K"
+		cfg.Bitrate = "600K"
 	}
 	if cfg.Copies <= 0 {
 		cfg.Copies = 1
 	}
 
-	activeW := cfg.Cols * cellSize
-	activeH := cfg.Rows * cellSize
-	if activeW > cfg.Width {
-		return nil, fmt.Errorf("squares: active area %dpx exceeds width %dpx",
-			activeW, cfg.Width)
-	}
-	if activeH > cfg.Height {
-		return nil, fmt.Errorf("squares: active area %dpx exceeds height %dpx",
-			activeH, cfg.Height)
-	}
-
-	cells := cfg.Cols * cfg.Rows
-	if cells%2 != 0 {
-		return nil, fmt.Errorf("squares: cells=%d must be even", cells)
-	}
-	payloadBytes := cells / 2
-
-	maxData := payloadBytes - hdrLen
-	maxMessage := maxData - recHdr
-
-	if maxMessage < 32 {
-		return nil, fmt.Errorf("squares: payload too small (%d bytes)", maxMessage)
-	}
 	return &Pipe{
 		tunnel:       tunnel,
 		cfg:          cfg,
-		cells:        cells,
+		cells:        cfg.Cols * cfg.Rows,
 		payloadBytes: payloadBytes,
 		maxMessage:   maxMessage,
 		maxData:      maxData,
@@ -262,24 +255,23 @@ func (p *Pipe) sendLoop() {
 	}
 }
 
-// takeBatch набирает посылок на maxData байт (с учётом 2-байтных префиксов).
 func (p *Pipe) takeBatch() [][]byte {
 	var out [][]byte
 	used := 0
 	if p.carry != nil {
 		out = append(out, p.carry)
-		used += len(p.carry) + recHdr
+		used += len(p.carry) + RecHdr
 		p.carry = nil
 	}
 	for used < p.maxData {
 		select {
 		case m := <-p.sendCh:
-			if used+len(m)+recHdr > p.maxData {
+			if used+len(m)+RecHdr > p.maxData {
 				p.carry = m
 				return out
 			}
 			out = append(out, m)
-			used += len(m) + recHdr
+			used += len(m) + RecHdr
 		default:
 			return out
 		}
@@ -297,7 +289,7 @@ func (p *Pipe) sendBatch(batch [][]byte) error {
 	payload := make([]byte, p.payloadBytes)
 	binary.LittleEndian.PutUint32(payload[0:4], uint32(len(data)))
 	binary.LittleEndian.PutUint32(payload[4:8], crc32.ChecksumIEEE(data))
-	copy(payload[hdrLen:], data)
+	copy(payload[HdrLen:], data)
 	p.stMsgs.Add(int64(len(batch)))
 	return p.emit(payload, fmt.Sprintf("batch msgs=%d bytes=%d", len(batch), len(data)))
 }
@@ -309,10 +301,10 @@ func (p *Pipe) sendIdle() error {
 	for r := 0; r < p.cfg.Rows; r++ {
 		for c := 0; c < p.cfg.Cols; c++ {
 			idx := r*p.cfg.Cols + c
-			if idx < hdrCells {
+			if idx < HdrCells {
 				continue
 			}
-			val := byte((r + c + seq) % 16)
+			val := byte((r + c + seq/8) % 16)
 			set4Bit(payload, idx*4, val)
 		}
 	}
@@ -321,7 +313,8 @@ func (p *Pipe) sendIdle() error {
 
 func (p *Pipe) emit(payload []byte, label string) error {
 	rgb := p.rgbBuf
-	EncodeFrame(rgb, p.cfg.Width, p.cfg.Height, p.cfg.Cols, p.cfg.Rows, payload)
+	EncodeFrame(rgb, p.cfg.Width, p.cfg.Height, p.cfg.Cols, p.cfg.Rows,
+		p.cfg.CellSize, payload)
 	frame, err := p.enc.Encode(rgb)
 	if err != nil {
 		return fmt.Errorf("squares: encode: %w", err)
@@ -398,7 +391,7 @@ func (p *Pipe) recvLoop() {
 			continue
 		}
 		payload := DecodeFrame(rgb, p.cfg.Width, p.cfg.Height,
-			p.cfg.Cols, p.cfg.Rows, p.payloadBytes)
+			p.cfg.Cols, p.cfg.Rows, p.cfg.CellSize, p.payloadBytes)
 		if payload == nil {
 			continue
 		}
@@ -415,16 +408,16 @@ func (p *Pipe) recvLoop() {
 			continue
 		}
 		crcGot := binary.LittleEndian.Uint32(payload[4:8])
-		data := payload[hdrLen : hdrLen+int(length)]
+		data := payload[HdrLen : HdrLen+int(length)]
 		if crc32.ChecksumIEEE(data) != crcGot {
 			log.Printf("[squares] recv #%d CRC-FAIL len=%d", frameCount, length)
 			continue
 		}
 		off := 0
 		n := 0
-		for off+recHdr <= len(data) {
+		for off+RecHdr <= len(data) {
 			mlen := int(data[off]) | int(data[off+1])<<8
-			off += recHdr
+			off += RecHdr
 			if mlen == 0 {
 				break
 			}

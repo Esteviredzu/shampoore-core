@@ -1,8 +1,8 @@
 package squares
 
-func EncodeFrame(dst []byte, width, height, cols, rows int, payload []byte) {
-	const cellSize = 16
-
+// EncodeFrame рисует payload в rgb-буфер.
+// cellSize — размер клетки на экране (в пикселях).
+func EncodeFrame(dst []byte, width, height, cols, rows, cellSize int, payload []byte) {
 	fillRect(dst, width, 0, 0, width, height, IdleBG)
 
 	for r := 0; r < rows; r++ {
@@ -17,8 +17,9 @@ func EncodeFrame(dst []byte, width, height, cols, rows int, payload []byte) {
 		}
 	}
 }
-func DecodeFrame(rgb []byte, width, height, cols, rows, payloadBytes int) []byte {
-	const cellSize = 16
+
+// DecodeFrame сэмплирует центры клеток из rgb-буфера.
+func DecodeFrame(rgb []byte, width, height, cols, rows, cellSize, payloadBytes int) []byte {
 	if len(rgb) < width*height*3 {
 		return nil
 	}
