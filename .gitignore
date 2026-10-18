@@ -8,6 +8,7 @@ config_yandextelemost_client.json
 config_yandextelemost_server.json
 squares-visual
 bin
+speedtest.py
 video.mp4
 *.log
 
