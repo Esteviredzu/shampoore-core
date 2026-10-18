@@ -3,7 +3,11 @@
 *.exe
 
 config_yandexboard.json
-
+config_yandextelemost.json
+config_yandextelemost_client.json
+config_yandextelemost_server.json
+squares-visual
+video.mp4
 *.log
 
 .vscode/

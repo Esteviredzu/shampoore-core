@@ -47,6 +47,10 @@ type bootstrapResult struct {
 }
 
 func bootstrap(ctx context.Context, cfg *Config) (*bootstrapResult, error) {
+	if cfg.LocalSignalingURL != "" {
+		return fakeBootstrap(cfg.LocalSignalingURL), nil
+	}
+
 	conferenceLink := strings.TrimSpace(cfg.ConferenceLink)
 	if conferenceLink == "" {
 		return nil, errors.New("telemost: empty conference link")
@@ -79,6 +83,25 @@ func bootstrap(ctx context.Context, cfg *Config) (*bootstrapResult, error) {
 		http:   httpClient,
 		instID: instID,
 	}, nil
+}
+
+// fakeBootstrap возвращает синтетический bootstrapResult для локального
+// signaling-сервера. Никаких HTTP-запросов к Yandex не делается.
+func fakeBootstrap(url string) *bootstrapResult {
+	return &bootstrapResult{
+		info: &ConferenceInfo{
+			PeerID:           newUUID(),
+			RoomID:           newUUID(),
+			SessionID:        newUUID(),
+			PeerSessionID:    newUUID(),
+			Credentials:      "local",
+			MediaServerURL:   url,
+			ServiceName:      "local",
+			ICEServers:       nil,
+			StateCheckPeriod: 30 * time.Second,
+		},
+		instID: newUUID(),
+	}
 }
 
 func fetchPage(ctx context.Context, c *http.Client, pageURL string) error {

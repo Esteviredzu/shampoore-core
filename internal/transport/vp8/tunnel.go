@@ -1,14 +1,15 @@
+// FILE: internal/transport/vp8/tunnel.go
 package vp8
 
 import (
 	"context"
 	"errors"
-	"io"
 	"log"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/pion/rtcp"
 	"github.com/pion/rtp/codecs"
 	"github.com/pion/webrtc/v4"
 	"github.com/pion/webrtc/v4/pkg/media"
@@ -19,99 +20,110 @@ const (
 	TrackID  = "video"
 	frameDur = 33 * time.Millisecond
 
-	keepaliveInterval = 200 * time.Millisecond
-
-	writeSampleTimeout = 2 * time.Second
-
-	vp8HeaderSize = 10
-
-	vp8MaxPayload = (1 << 19) - 1 - 7
+	writeSampleTimeout = 5 * time.Second
+	vp8MaxPayload      = (1 << 19) - 1 - 7
 
 	incomingBufferSize = 1024
+
+	pliInterval = 500 * time.Millisecond
 )
 
-var keepaliveSample = makeKeepalive()
-
-func makeKeepalive() []byte {
-	payload := make([]byte, 990)
-	fp := len(payload)
-
-	out := make([]byte, vp8HeaderSize+len(payload))
-	out[0] = 0x10 | byte((fp&0x07)<<5)
-	out[1] = byte((fp >> 3) & 0xFF)
-	out[2] = byte((fp >> 11) & 0xFF)
-	out[3] = 0x9d
-	out[4] = 0x01
-	out[5] = 0x2a
-	out[6] = 0x02
-	out[7] = 0x00
-	out[8] = 0x02
-	out[9] = 0x00
-	return out
-}
-
 type Tunnel struct {
-	pubTrack *webrtc.TrackLocalStaticSample
-	subTrack *webrtc.TrackRemote
+	pubTrack     *webrtc.TrackLocalStaticSample
+	sharingTrack *webrtc.TrackLocalStaticSample
 
-	incoming     chan []byte
-	errors       chan error
-	subReady     chan struct{}
-	subReadyOnce sync.Once
+	subPC *webrtc.PeerConnection
+
+	remoteMu     sync.Mutex
+	remoteTracks map[webrtc.SSRC]bool
+
+	incoming chan []byte
+	errors   chan error
+	closed   chan struct{}
 
 	writeMu     sync.Mutex
 	lastWriteAt atomic.Int64
 
-	keepaliveCancel context.CancelFunc
-
 	closeOnce sync.Once
-	closed    chan struct{}
 }
 
-func NewTunnel(pubPC, subPC *webrtc.PeerConnection) (*Tunnel, error) {
-	track, err := webrtc.NewTrackLocalStaticSample(
-		webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeVP8},
-		TrackID, StreamID,
-	)
-	if err != nil {
-		return nil, err
-	}
-	if _, err := pubPC.AddTrack(track); err != nil {
-		return nil, err
-	}
-	return AttachTunnel(pubPC, subPC, track)
-}
-
-func AttachTunnel(pubPC, subPC *webrtc.PeerConnection, track *webrtc.TrackLocalStaticSample) (*Tunnel, error) {
+func AttachTunnel(
+	pubPC, subPC *webrtc.PeerConnection,
+	track *webrtc.TrackLocalStaticSample,
+) (*Tunnel, error) {
 	t := &Tunnel{
-		pubTrack: track,
-		incoming: make(chan []byte, incomingBufferSize),
-		errors:   make(chan error, 1),
-		subReady: make(chan struct{}),
-		closed:   make(chan struct{}),
+		pubTrack:     track,
+		subPC:        subPC,
+		remoteTracks: make(map[webrtc.SSRC]bool),
+		incoming:     make(chan []byte, incomingBufferSize),
+		errors:       make(chan error, 1),
+		closed:       make(chan struct{}),
 	}
 
 	if subPC != nil {
 		subPC.OnTrack(func(remote *webrtc.TrackRemote, _ *webrtc.RTPReceiver) {
 			mime := remote.Codec().MimeType
-			log.Printf("[vp8] OnTrack: %s", mime)
+			ssrc := remote.SSRC()
+			log.Printf("[vp8] OnTrack: %s ssrc=%d", mime, ssrc)
 
 			if mime != webrtc.MimeTypeVP8 {
 				go drainTrack(remote)
 				return
 			}
 
-			t.subTrack = remote
-			t.subReadyOnce.Do(func() { close(t.subReady) })
-			t.readLoop(remote)
+			if !t.bindRemoteTrack(remote) {
+				log.Printf("[vp8] OnTrack: ssrc=%d already bound, ignoring", ssrc)
+				return
+			}
 		})
 	}
-
-	kaCtx, kaCancel := context.WithCancel(context.Background())
-	t.keepaliveCancel = kaCancel
-	go t.keepaliveLoop(kaCtx)
-
 	return t, nil
+}
+
+func (t *Tunnel) bindRemoteTrack(remote *webrtc.TrackRemote) bool {
+	ssrc := remote.SSRC()
+	t.remoteMu.Lock()
+	if t.remoteTracks[ssrc] {
+		t.remoteMu.Unlock()
+		return false
+	}
+	t.remoteTracks[ssrc] = true
+	t.remoteMu.Unlock()
+
+	log.Printf("[vp8] bindRemoteTrack: ssrc=%d stream=%s id=%s",
+		ssrc, remote.StreamID(), remote.ID())
+
+	go t.pliLoop(ssrc)
+	go t.readLoop(remote)
+	return true
+}
+
+func (t *Tunnel) pliLoop(ssrc webrtc.SSRC) {
+	ticker := time.NewTicker(pliInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-t.closed:
+			return
+		case <-ticker.C:
+		}
+
+		if t.subPC == nil {
+			return
+		}
+		pli := &rtcp.PictureLossIndication{
+			MediaSSRC: uint32(ssrc),
+		}
+		if err := t.subPC.WriteRTCP([]rtcp.Packet{pli}); err != nil {
+			log.Printf("[vp8] PLI error: %v", err)
+			return
+		}
+	}
+}
+
+func (t *Tunnel) SetSharingTrack(track *webrtc.TrackLocalStaticSample) {
+	t.sharingTrack = track
 }
 
 func drainTrack(remote *webrtc.TrackRemote) {
@@ -122,7 +134,9 @@ func drainTrack(remote *webrtc.TrackRemote) {
 	}
 }
 
-func (t *Tunnel) writeSample(data []byte) error {
+func (t *Tunnel) SetRawMode(_ bool) {}
+
+func (t *Tunnel) WriteRawVP8(data []byte) error {
 	select {
 	case <-t.closed:
 		return errors.New("vp8: tunnel closed")
@@ -133,13 +147,11 @@ func (t *Tunnel) writeSample(data []byte) error {
 		return errors.New("vp8: payload too large")
 	}
 
-	wrapped := wrapVP8Keyframe(data)
-
 	done := make(chan error, 1)
 	go func() {
 		t.writeMu.Lock()
 		defer t.writeMu.Unlock()
-		done <- t.pubTrack.WriteSample(media.Sample{Data: wrapped, Duration: frameDur})
+		done <- t.pubTrack.WriteSample(media.Sample{Data: data, Duration: frameDur})
 	}()
 
 	select {
@@ -155,34 +167,34 @@ func (t *Tunnel) writeSample(data []byte) error {
 	}
 }
 
-func (t *Tunnel) WriteSample(data []byte) error {
-	return t.writeSample(data)
-}
+func (t *Tunnel) WriteSharingVP8(data []byte) error {
+	select {
+	case <-t.closed:
+		return errors.New("vp8: tunnel closed")
+	default:
+	}
 
-func (t *Tunnel) keepaliveLoop(ctx context.Context) {
-	ticker := time.NewTicker(keepaliveInterval)
-	defer ticker.Stop()
+	if t.sharingTrack == nil {
+		return errors.New("vp8: sharing track not set")
+	}
+	if len(data) > vp8MaxPayload {
+		return errors.New("vp8: payload too large")
+	}
 
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-t.closed:
-			return
-		case <-ticker.C:
-			select {
-			case <-t.closed:
-				return
-			default:
-			}
+	done := make(chan error, 1)
+	go func() {
+		t.writeMu.Lock()
+		defer t.writeMu.Unlock()
+		done <- t.sharingTrack.WriteSample(media.Sample{Data: data, Duration: frameDur})
+	}()
 
-			last := t.lastWriteAt.Load()
-			if last != 0 && time.Since(time.Unix(0, last)) < keepaliveInterval {
-				continue
-			}
-
-			_ = t.writeSample(keepaliveSample)
-		}
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(writeSampleTimeout):
+		return errors.New("vp8: sharing write sample timeout")
+	case <-t.closed:
+		return errors.New("vp8: tunnel closed")
 	}
 }
 
@@ -199,99 +211,39 @@ func (t *Tunnel) Receive(ctx context.Context) ([]byte, error) {
 	}
 }
 
-func (t *Tunnel) WaitSubTrack(ctx context.Context) error {
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-t.subReady:
-		return nil
-	case <-t.closed:
-		return errors.New("vp8: tunnel closed")
-	}
-}
-
 func (t *Tunnel) Close() error {
-	t.closeOnce.Do(func() {
-		if t.keepaliveCancel != nil {
-			t.keepaliveCancel()
-		}
-		close(t.closed)
-	})
+	t.closeOnce.Do(func() { close(t.closed) })
 	return nil
 }
 
-func (t *Tunnel) reportError(err error) {
-	select {
-	case t.errors <- err:
-	default:
-	}
-}
-
-func wrapVP8Keyframe(data []byte) []byte {
-	fp := len(data)
-
-	out := make([]byte, vp8HeaderSize+len(data))
-
-	out[0] = 0x10 | byte((fp&0x07)<<5)
-	out[1] = byte((fp >> 3) & 0xFF)
-	out[2] = byte((fp >> 11) & 0xFF)
-
-	out[3] = 0x9d
-	out[4] = 0x01
-	out[5] = 0x2a
-
-	out[6] = 0x02
-	out[7] = 0x00
-	out[8] = 0x02
-	out[9] = 0x00
-
-	copy(out[vp8HeaderSize:], data)
-	return out
-}
-
-func unwrapVP8Keyframe(data []byte) []byte {
-	if len(data) < vp8HeaderSize {
-		return nil
-	}
-	if data[3] != 0x9d || data[4] != 0x01 || data[5] != 0x2a {
-		return nil
-	}
-
-	fp := int(data[0]>>5&0x07) |
-		int(data[1])<<3 |
-		int(data[2])<<11
-
-	if fp != len(data)-vp8HeaderSize {
-		return nil
-	}
-	if data[6] != 0x02 || data[7] != 0x00 || data[8] != 0x02 || data[9] != 0x00 {
-		return nil
-	}
-
-	payload := make([]byte, len(data)-vp8HeaderSize)
-	copy(payload, data[vp8HeaderSize:])
-	return payload
-}
-
-func isKeepalive(data []byte) bool {
-	if len(data) < 32 {
+func isVP8Keyframe(data []byte) bool {
+	if len(data) < 1 {
 		return false
 	}
-	for i := 0; i < 32; i++ {
-		if data[i] != 0 {
-			return false
-		}
-	}
-	return true
+	return (data[0] & 0x01) == 0
 }
 
 func (t *Tunnel) readLoop(remote *webrtc.TrackRemote) {
 	var vp8 codecs.VP8Packet
-	var frame []byte
-	var expectSeq uint16
-	var haveSeq bool
-	var valid bool
-	var totalFrames int
+
+	frameBuf := make([]byte, 0, 256*1024)
+	frame := frameBuf[:0]
+	frameStarted := false
+
+	var (
+		totalFrames          int
+		rtpCount             int
+		droppedUntilKeyframe int
+		seenKeyframe         bool
+		droppedFull          int
+		gapFrames            int
+	)
+
+	var (
+		lastSeq     uint16
+		haveLastSeq bool
+		frameHasGap bool
+	)
 
 	for {
 		select {
@@ -304,57 +256,81 @@ func (t *Tunnel) readLoop(remote *webrtc.TrackRemote) {
 		if err != nil {
 			return
 		}
-		if haveSeq && pkt.SequenceNumber != expectSeq {
-			valid = false
-			frame = frame[:0]
+		rtpCount++
+
+		if haveLastSeq && pkt.SequenceNumber != lastSeq+1 {
+			if frameStarted {
+				frameHasGap = true
+			}
 		}
-		expectSeq = pkt.SequenceNumber + 1
-		haveSeq = true
+		lastSeq = pkt.SequenceNumber
+		haveLastSeq = true
 
 		payload, err := vp8.Unmarshal(pkt.Payload)
 		if err != nil {
-			valid = false
-			frame = frame[:0]
 			continue
 		}
+
 		if vp8.S == 1 {
-			frame = frame[:0]
-			valid = true
+			frame = frameBuf[:0]
+			frameStarted = true
+			frameHasGap = false
 		}
-		if !valid {
+		if !frameStarted {
 			continue
 		}
+
 		frame = append(frame, payload...)
+
 		if !pkt.Marker {
 			continue
 		}
 
-		full := make([]byte, len(frame))
-		copy(full, frame)
-		frame = frame[:0]
-		valid = false
+		frameStarted = false
+		if len(frame) == 0 {
+			continue
+		}
+
+		if !seenKeyframe {
+			if !isVP8Keyframe(frame) {
+				droppedUntilKeyframe++
+				continue
+			}
+			seenKeyframe = true
+			log.Printf("[vp8] GOT KEYFRAME after %d dropped frames, size=%d",
+				droppedUntilKeyframe, len(frame))
+		}
+
+		if frameHasGap {
+			gapFrames++
+		}
 
 		totalFrames++
-		if totalFrames <= 20 || totalFrames%200 == 0 ||
-			(len(full) != 1000 && len(full) != 1010) {
-			log.Printf("[vp8] recv frame #%d size=%d", totalFrames, len(full))
+		if totalFrames <= 10 || totalFrames%100 == 0 {
+			log.Printf("[vp8] recv frame #%d size=%d keyframe=%v (rtp=%d gaps=%d/%d ch_drops=%d)",
+				totalFrames, len(frame), isVP8Keyframe(frame),
+				rtpCount, gapFrames, totalFrames, droppedFull)
 		}
 
-		unwrapped := unwrapVP8Keyframe(full)
-		if unwrapped == nil {
-			continue
-		}
-
-		if isKeepalive(unwrapped) {
-			continue
-		}
+		full := make([]byte, len(frame))
+		copy(full, frame)
 
 		select {
-		case t.incoming <- unwrapped:
+		case t.incoming <- full:
 		case <-t.closed:
 			return
+		default:
+			droppedFull++
+			if droppedFull == 1 || droppedFull%100 == 0 {
+				log.Printf("[vp8] WARNING: incoming channel full, dropped %d frame(s)", droppedFull)
+			}
 		}
 	}
 }
 
-var _ = io.EOF
+func boolStr(b bool) string {
+	if b {
+		return "true"
+	}
+	return "false"
+}

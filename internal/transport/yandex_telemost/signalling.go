@@ -1,3 +1,4 @@
+// FILE: internal/transport/yandex_telemost/signalling.go
 package telemost
 
 import (
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/pion/interceptor"
 	"github.com/pion/webrtc/v4"
 
 	"github.com/Esteviredzu/shampoore-core/internal/logging"
@@ -32,9 +34,11 @@ type signaling struct {
 	pubPC *webrtc.PeerConnection
 	subPC *webrtc.PeerConnection
 
-	sampleTrack *webrtc.TrackLocalStaticSample
-	audioTrack  *webrtc.TrackLocalStaticRTP
-	tunnel      *vp8.Tunnel
+	sampleTrack  *webrtc.TrackLocalStaticSample
+	sharingTrack *webrtc.TrackLocalStaticSample
+
+	audioTrack *webrtc.TrackLocalStaticRTP
+	tunnel     *vp8.Tunnel
 
 	pubRemoteSet bool
 	subRemoteSet bool
@@ -48,6 +52,9 @@ type signaling struct {
 	pubReadySent bool
 	subReadySent bool
 	readyMu      sync.Mutex
+
+	sharingOn bool
+	sharingMu sync.Mutex
 
 	onPublishReady func()
 	onSubscribe    func()
@@ -63,6 +70,21 @@ func newSignaling(cfg *Config, boot *bootstrapResult, logger logging.ContextLogg
 		logger: logger,
 		closed: make(chan struct{}),
 	}
+}
+
+func newWebRTCAPI() *webrtc.API {
+	m := &webrtc.MediaEngine{}
+	if err := m.RegisterDefaultCodecs(); err != nil {
+		panic(err)
+	}
+	i := &interceptor.Registry{}
+	if err := webrtc.RegisterDefaultInterceptors(m, i); err != nil {
+		panic(err)
+	}
+	return webrtc.NewAPI(
+		webrtc.WithMediaEngine(m),
+		webrtc.WithInterceptorRegistry(i),
+	)
 }
 
 func (s *signaling) Tunnel() *vp8.Tunnel { return s.tunnel }
@@ -170,24 +192,33 @@ func (s *signaling) pingLoop(ctx context.Context) {
 }
 
 func (s *signaling) sendHello() error {
+	role := s.cfg.Role
+	if role == "" {
+		role = "SPEAKER"
+	}
+
+	sendVideo := !s.cfg.UseSharing
+	sendSharing := s.cfg.UseSharing
+
 	hello := map[string]any{
 		"uid": newUUID(),
 		"hello": map[string]any{
 			"participantMeta": map[string]any{
 				"name":        s.cfg.EffectiveDisplayName(),
-				"role":        "SPEAKER",
+				"role":        role,
 				"description": "",
 				"sendAudio":   false,
-				"sendVideo":   true,
+				"sendVideo":   sendVideo,
+				"sendSharing": sendSharing,
 			},
 			"participantAttributes": map[string]any{
 				"name":        s.cfg.EffectiveDisplayName(),
-				"role":        "SPEAKER",
+				"role":        role,
 				"description": "",
 			},
 			"sendAudio":             false,
-			"sendVideo":             true,
-			"sendSharing":           false,
+			"sendVideo":             sendVideo,
+			"sendSharing":           sendSharing,
 			"participantId":         s.boot.info.PeerID,
 			"roomId":                s.boot.info.RoomID,
 			"serviceName":           s.boot.info.ServiceName,
@@ -239,6 +270,10 @@ func (s *signaling) handleMessage(raw []byte) error {
 	case msg["webrtcIceCandidate"] != nil:
 		s.ack(uid)
 		return s.onICECandidate(msg["webrtcIceCandidate"])
+
+	case msg["upsertDescription"] != nil:
+		s.ack(uid)
+		return s.onUpsertDescription(msg["upsertDescription"])
 
 	case msg["ack"] != nil:
 		return nil
@@ -324,11 +359,13 @@ func (s *signaling) initPeerConnections(ice []ICEServer) error {
 		cfg.ICEServers = append(cfg.ICEServers, entry)
 	}
 
-	pubPC, err := webrtc.NewPeerConnection(cfg)
+	api := newWebRTCAPI()
+
+	pubPC, err := api.NewPeerConnection(cfg)
 	if err != nil {
 		return err
 	}
-	subPC, err := webrtc.NewPeerConnection(cfg)
+	subPC, err := api.NewPeerConnection(cfg)
 	if err != nil {
 		_ = pubPC.Close()
 		return err
@@ -337,32 +374,40 @@ func (s *signaling) initPeerConnections(ice []ICEServer) error {
 	s.pubPC = pubPC
 	s.subPC = subPC
 
-	// AUDIO (Opus) — обязателен для SFU.
-	audioTrack, err := webrtc.NewTrackLocalStaticRTP(
-		webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeOpus},
-		"audio", "shampoore-audio",
-	)
-	if err != nil {
-		_ = pubPC.Close()
-		_ = subPC.Close()
-		return err
-	}
-	audioTr, err := pubPC.AddTransceiverFromTrack(
-		audioTrack,
-		webrtc.RTPTransceiverInit{Direction: webrtc.RTPTransceiverDirectionSendonly},
-	)
-	if err != nil {
-		_ = pubPC.Close()
-		_ = subPC.Close()
-		return err
-	}
-	go drainSenderRTCP(audioTr.Sender())
-	s.audioTrack = audioTrack
+	// Аудио-трек отключён: для передачи данных он не нужен, а SFU
+	// Телемоста может отдавать приоритет видео-треку в комнате с аудио.
+	// Если понадобится вернуть — раскомментируйте блок ниже.
+	//
+	// audioTrack, err := webrtc.NewTrackLocalStaticRTP(
+	// 	webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeOpus},
+	// 	"audio", "shampoore-audio",
+	// )
+	// if err != nil {
+	// 	_ = pubPC.Close()
+	// 	_ = subPC.Close()
+	// 	return err
+	// }
+	// audioTr, err := pubPC.AddTransceiverFromTrack(
+	// 	audioTrack,
+	// 	webrtc.RTPTransceiverInit{Direction: webrtc.RTPTransceiverDirectionSendonly},
+	// )
+	// if err != nil {
+	// 	_ = pubPC.Close()
+	// 	_ = subPC.Close()
+	// 	return err
+	// }
+	// go drainSenderRTCP(audioTr.Sender())
+	// s.audioTrack = audioTrack
 
-	// VIDEO (VP8) — основной канал.
-	track, err := webrtc.NewTrackLocalStaticSample(
+	trackID := "video-" + s.boot.info.PeerID
+	streamID := "shampoore-" + s.boot.info.PeerID
+	if s.cfg.UseSharing {
+		trackID = "screen-" + s.boot.info.PeerID
+		streamID = "shampoore-screen-" + s.boot.info.PeerID
+	}
+	videoTrack, err := webrtc.NewTrackLocalStaticSample(
 		webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeVP8},
-		vp8.TrackID, vp8.StreamID,
+		trackID, streamID,
 	)
 	if err != nil {
 		_ = pubPC.Close()
@@ -370,7 +415,7 @@ func (s *signaling) initPeerConnections(ice []ICEServer) error {
 		return err
 	}
 	videoTr, err := pubPC.AddTransceiverFromTrack(
-		track,
+		videoTrack,
 		webrtc.RTPTransceiverInit{Direction: webrtc.RTPTransceiverDirectionSendonly},
 	)
 	if err != nil {
@@ -379,15 +424,25 @@ func (s *signaling) initPeerConnections(ice []ICEServer) error {
 		return err
 	}
 	go drainSenderRTCP(videoTr.Sender())
-	s.sampleTrack = track
 
-	tunnel, err := vp8.AttachTunnel(pubPC, subPC, track)
+	if s.cfg.UseSharing {
+		s.sharingTrack = videoTrack
+	} else {
+		s.sampleTrack = videoTrack
+	}
+
+	tunnel, err := vp8.AttachTunnel(pubPC, subPC, videoTrack)
 	if err != nil {
 		_ = pubPC.Close()
 		_ = subPC.Close()
 		return err
 	}
 	s.tunnel = tunnel
+
+	if s.sharingTrack != nil {
+		tunnel.SetSharingTrack(s.sharingTrack)
+		s.logger.Info("telemost: sharing track attached to tunnel")
+	}
 
 	pubPC.OnICECandidate(func(c *webrtc.ICECandidate) {
 		if c == nil {
@@ -479,7 +534,6 @@ func (s *signaling) startPublish() error {
 		return err
 	}
 
-	// ГЛАВНОЕ: мутируем SDP перед отправкой — добавляем a=content:speaker,main.
 	offer.SDP = mungeSDPAddVideoContent(offer.SDP)
 
 	videoMids, audioMids := parseMids(offer.SDP)
@@ -491,27 +545,23 @@ func (s *signaling) startPublish() error {
 			"transceiverMid": audioMids[0],
 			"kind":           "AUDIO",
 			"priority":       0,
-			"label":          "",
+			"label":          "Microphone",
 			"codecs":         map[string]any{},
 			"groupId":        1,
 			"description":    "",
 		})
 	}
 	if len(videoMids) > 0 {
-		tracks = append(tracks, map[string]any{
-			"mid":            videoMids[0],
-			"transceiverMid": videoMids[0],
-			"kind":           "VIDEO",
-			"priority":       0,
-			"label":          "",
-			"codecs":         map[string]any{},
-			"groupId":        1,
-			"description":    "",
-		})
+		label := ""
+		if s.cfg.UseSharing {
+			label = "Screen"
+		}
+		tracks = append(tracks, DisplayVideoTrack(videoMids[0], label))
 	}
 
 	s.logger.Debug("telemost: -> publisherSdpOffer pcSeq=", s.pubSeq,
-		" tracks=", len(tracks), " audioMids=", audioMids, " videoMids=", videoMids)
+		" tracks=", len(tracks), " audioMids=", audioMids, " videoMids=", videoMids,
+		" useSharing=", s.cfg.UseSharing)
 
 	return s.wsSend(map[string]any{
 		"uid": newUUID(),
@@ -547,12 +597,16 @@ func (s *signaling) onPublisherAnswer(raw any) error {
 		_ = s.pubPC.AddICECandidate(c)
 	}
 
-	// sdkCodecsInfo, updatePublisherTrackDescription, setSlots-ramp
 	s.wsSend(sdkCodecsInfoMessage())
+
+	videoLabel := ""
+	if s.cfg.UseSharing {
+		videoLabel = "Screen"
+	}
 	s.wsSend(updatePublisherTrackDescriptionMessage(
 		s.pubPC,
 		"Microphone",
-		"MacBook Pro Camera (0000:0001)",
+		videoLabel,
 	))
 
 	for i := 0; i < 4; i++ {
@@ -562,6 +616,26 @@ func (s *signaling) onPublisherAnswer(raw any) error {
 		s.logger.Debug("telemost: -> setSlots key=", key, " startup=", i+1)
 	}
 
+	if s.cfg.UseSharing {
+		s.logger.Info("telemost: -> updatePublisherSharingTrack Screen")
+		s.wsSend(UpdatePublisherSharingTrackMessage("Screen"))
+		s.wsSend(UpdateMeMessage(s.cfg.EffectiveDisplayName(), false, true))
+	}
+
+	return nil
+}
+
+// onUpsertDescription — SFU сообщает о появлении нового трека.
+// НЕ привязываем трек здесь: он может прийти раньше, чем Pion начнёт
+// отдавать RTP через OnTrack. Привязка идёт исключительно в OnTrack
+// (см. vp8.AttachTunnel). Иначе получаются два reader'а на один трек
+// и RTP-пакеты уходят по одному в каждый — картинка разрывается.
+func (s *signaling) onUpsertDescription(raw any) error {
+	m, _ := raw.(map[string]any)
+	if m == nil {
+		return nil
+	}
+	s.logger.Debug("telemost: upsertDescription received (binding will happen in OnTrack)")
 	return nil
 }
 

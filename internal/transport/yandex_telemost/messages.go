@@ -111,6 +111,56 @@ func sdkCodecsInfoMessage() map[string]any {
 	}
 }
 
+// DisplayVideoTrack — дескриптор video-трека для publisherSdpOffer.
+// label="Screen" помечает его как screen sharing.
+func DisplayVideoTrack(mid, label string) map[string]any {
+	return map[string]any{
+		"mid":            mid,
+		"transceiverMid": mid,
+		"kind":           "VIDEO",
+		"priority":       0,
+		"label":          label,
+		"codecs":         map[string]any{},
+		"groupId":        2,
+		"description":    "",
+	}
+}
+
+// UpdatePublisherSharingTrackMessage — SFU: мы начинаем публиковать screen sharing.
+func UpdatePublisherSharingTrackMessage(label string) map[string]any {
+	return map[string]any{
+		"uid": uuid.NewString(),
+		"updatePublisherSharingTrack": map[string]any{
+			"label": label,
+		},
+	}
+}
+
+// UpdateMeMessage — SFU: изменились наши возможности публикации.
+func UpdateMeMessage(name string, sendVideo, sendSharing bool) map[string]any {
+	return map[string]any{
+		"uid": uuid.NewString(),
+		"updateMe": map[string]any{
+			"participantMeta": map[string]any{
+				"name":        name,
+				"role":        "SPEAKER",
+				"description": "",
+				"sendAudio":   false,
+				"sendVideo":   sendVideo,
+				"sendSharing": sendSharing,
+			},
+			"participantAttributes": map[string]any{
+				"name":        name,
+				"role":        "SPEAKER",
+				"description": "",
+			},
+			"sendAudio":   false,
+			"sendVideo":   sendVideo,
+			"sendSharing": sendSharing,
+		},
+	}
+}
+
 func updatePublisherTrackDescriptionMessage(pc *webrtc.PeerConnection, audioLabel, videoLabel string) map[string]any {
 	var descs []map[string]any
 	for _, tr := range pc.GetTransceivers() {

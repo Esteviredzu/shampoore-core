@@ -77,8 +77,14 @@ func main() {
 
 	println("server: ready")
 	<-ctx.Done()
+	println("server: stopping")
+
+	stopCtx, cancelStop := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelStop()
 
 	handler.Stop()
-	_ = rt.Stop(context.Background())
-	_ = mux.Stop(context.Background())
+	_ = rt.Stop(stopCtx)
+	_ = mux.Stop(stopCtx)
+
+	println("server: stopped")
 }

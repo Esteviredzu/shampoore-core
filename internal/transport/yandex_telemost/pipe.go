@@ -1,3 +1,4 @@
+// FILE: internal/transport/yandex_telemost/pipe.go
 package telemost
 
 import (
@@ -8,7 +9,6 @@ import (
 	"time"
 
 	"github.com/Esteviredzu/shampoore-core/internal/logging"
-	"github.com/Esteviredzu/shampoore-core/internal/transport"
 	"github.com/Esteviredzu/shampoore-core/internal/transport/vp8"
 )
 
@@ -18,30 +18,19 @@ const (
 )
 
 type Pipe struct {
-	cfg        *Config
-	boot       *bootstrapResult
-	logger     logging.ContextLogger
-	vp8Options vp8.PipeOptions
+	cfg    *Config
+	boot   *bootstrapResult
+	logger logging.ContextLogger
 
-	sig   *signaling
-	inner transport.Pipe
+	sig    *signaling
+	tunnel *vp8.Tunnel
 
 	started  bool
 	stopOnce sync.Once
 }
 
-func NewPipe(
-	cfg *Config,
-	boot *bootstrapResult,
-	logger logging.ContextLogger,
-	vp8Opts vp8.PipeOptions,
-) *Pipe {
-	return &Pipe{
-		cfg:        cfg,
-		boot:       boot,
-		logger:     logger,
-		vp8Options: vp8Opts,
-	}
+func NewPipe(cfg *Config, boot *bootstrapResult, logger logging.ContextLogger) *Pipe {
+	return &Pipe{cfg: cfg, boot: boot, logger: logger}
 }
 
 func (p *Pipe) Start(ctx context.Context) error {
@@ -58,9 +47,7 @@ func (p *Pipe) Start(ctx context.Context) error {
 	p.sig.onSubscribe = func() { subOnce.Do(func() { close(subReady) }) }
 
 	runErr := make(chan error, 1)
-	go func() {
-		runErr <- p.sig.Run(ctx)
-	}()
+	go func() { runErr <- p.sig.Run(ctx) }()
 
 	p.logger.Info("telemost: waiting for publish signaling...")
 	select {
@@ -83,73 +70,26 @@ func (p *Pipe) Start(ctx context.Context) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-time.After(subscribeTimeout):
-		p.logger.Warn("telemost: no subscriber yet, continuing " +
-			"(will attach when peer joins)")
+		p.logger.Warn("telemost: no subscriber yet, continuing")
 	}
 
 	tunnel := p.sig.Tunnel()
 	if tunnel == nil {
 		return errors.New("telemost: tunnel not created")
 	}
-	p.inner = vp8.AttachPipe(tunnel, p.vp8Options)
-	if err := p.inner.Start(ctx); err != nil {
-		return err
-	}
+	p.tunnel = tunnel
 	p.started = true
 	return nil
 }
 
 func (p *Pipe) Stop(ctx context.Context) error {
-	var err error
 	p.stopOnce.Do(func() {
-		if p.inner != nil {
-			_ = p.inner.Stop(ctx)
-		}
 		if p.sig != nil {
 			p.sig.Close()
 		}
 	})
-	return err
+	return nil
 }
-
-func (p *Pipe) SendMessage(ctx context.Context, data []byte, key string) error {
-	if p.inner == nil {
-		return errors.New("telemost: pipe not started")
-	}
-	return p.inner.SendMessage(ctx, data, key)
-}
-
-func (p *Pipe) ReceiveMessage(ctx context.Context) ([]byte, error) {
-	if p.inner == nil {
-		return nil, errors.New("telemost: pipe not started")
-	}
-	return p.inner.ReceiveMessage(ctx)
-}
-
-func (p *Pipe) DeleteMessage(ctx context.Context, key string) error {
-	if p.inner == nil {
-		return nil
-	}
-	return p.inner.DeleteMessage(ctx, key)
-}
-
-func (p *Pipe) SessionID() string {
-	if p.inner == nil {
-		return ""
-	}
-	return p.inner.SessionID()
-}
-
-func (p *Pipe) MaxMessageSize() int {
-	if p.inner == nil {
-		return 16000
-	}
-	return p.inner.MaxMessageSize()
-}
-
-var _ transport.Pipe = (*Pipe)(nil)
-
-
 
 func (p *Pipe) Tunnel() *vp8.Tunnel {
 	if p.sig == nil {

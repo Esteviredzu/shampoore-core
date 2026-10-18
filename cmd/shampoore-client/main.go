@@ -92,8 +92,13 @@ func main() {
 	<-ctx.Done()
 	println("client: stopping")
 
-	_ = rt.Stop(context.Background())
-	_ = mux.Stop(context.Background())
+	stopCtx, cancelStop := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelStop()
+
+	_ = rt.Stop(stopCtx)
+	_ = mux.Stop(stopCtx)
+
+	println("client: stopped")
 }
 
 func dedup(in []string) []string {

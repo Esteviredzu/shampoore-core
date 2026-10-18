@@ -142,7 +142,6 @@ func (s *RemoteHandler) handleStream(stream multiplexing.Stream) {
 		s.logger.Debug("remote: ", streamID, " closed")
 	}()
 
-	// Разблокировка conn.Read при отмене контекста (Stop).
 	stopWatch := make(chan struct{})
 	go func() {
 		select {
@@ -155,33 +154,47 @@ func (s *RemoteHandler) handleStream(stream multiplexing.Stream) {
 
 	done := make(chan struct{}, 2)
 
+	// upstream -> stream
 	go func() {
 		defer func() { done <- struct{}{} }()
 		buf := make([]byte, s.chunkSize)
 		for {
 			n, err := conn.Read(buf)
 			if n > 0 {
+				s.logger.Info("remote: ", streamID, " upstream->stream ",
+					n, " bytes")
 				if _, werr := stream.Write(buf[:n]); werr != nil {
+					s.logger.Warn("remote: ", streamID,
+						" stream.Write failed: ", werr)
 					return
 				}
 			}
 			if err != nil {
+				s.logger.Info("remote: ", streamID,
+					" conn.Read ended: ", err)
 				return
 			}
 		}
 	}()
 
+	// stream -> upstream
 	go func() {
 		defer func() { done <- struct{}{} }()
 		buf := make([]byte, s.chunkSize)
 		for {
 			n, err := stream.Read(buf)
 			if n > 0 {
+				s.logger.Info("remote: ", streamID, " stream->upstream ",
+					n, " bytes")
 				if _, werr := conn.Write(buf[:n]); werr != nil {
+					s.logger.Warn("remote: ", streamID,
+						" conn.Write failed: ", werr)
 					return
 				}
 			}
 			if err != nil {
+				s.logger.Info("remote: ", streamID,
+					" stream.Read ended: ", err)
 				return
 			}
 		}
