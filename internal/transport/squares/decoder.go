@@ -12,6 +12,14 @@ import (
 	"time"
 )
 
+// decodeTimeout — сколько ждём RGB от ffmpeg. Раньше было 150 мс,
+// и этого не хватало на keyframes (10+ KB) — они пропускались
+// молча, а вместе с ними и весь TCP-поток.
+const (
+	decodeTimeout = 500 * time.Millisecond
+	frameQueueLen = 32
+)
+
 type Decoder struct {
 	width, height int
 	fps           int
@@ -44,7 +52,7 @@ func NewDecoder(width, height, fps int) (*Decoder, error) {
 		width:   width,
 		height:  height,
 		fps:     fps,
-		frameCh: make(chan []byte, 4),
+		frameCh: make(chan []byte, frameQueueLen),
 		errCh:   make(chan error, 1),
 		needKey: true,
 	}
@@ -55,9 +63,6 @@ func NewDecoder(width, height, fps int) (*Decoder, error) {
 }
 
 func (d *Decoder) start() error {
-	// Минимальные флаги, как в squares/download/main.go, где ffmpeg
-	// работает. Не добавляем nobuffer/direct/low_delay — они могут
-	// отбрасывать первые кадры.
 	cmd := exec.Command("ffmpeg",
 		"-loglevel", "error",
 		"-f", "ivf", "-i", "-",
@@ -89,7 +94,6 @@ func (d *Decoder) start() error {
 	return nil
 }
 
-// IVF-заголовок — ровно как в squares/download/main.go, frame_count = 0.
 func (d *Decoder) writeIVFHeader() error {
 	h := make([]byte, 32)
 	copy(h[0:4], "DKIF")
@@ -130,10 +134,12 @@ func (d *Decoder) readLoop() {
 		} else if n%50 == 0 {
 			log.Printf("[squares/decoder] decoded %d frames, ffmpeg keeps up", n)
 		}
+		// БЛОКИРУЮЩИЙ send: пусть ffmpeg притормозит, но ничего не потеряем.
 		select {
 		case d.frameCh <- rgb:
-		default:
-			// не тормозим ffmpeg, если мы не успеваем
+		case <-time.After(decodeTimeout):
+			log.Printf("[squares/decoder] WARNING: frame dropped, "+
+				"consumer stalled > %v", decodeTimeout)
 		}
 	}
 }
@@ -145,11 +151,6 @@ func isVP8Keyframe(data []byte) bool {
 	return (data[0] & 0x01) == 0
 }
 
-// dumpFirstFrame — вспомогательная диагностика: сохраняет первый
-// VP8-кадр в /tmp/decoder_first_frame.ivf, чтобы вручную проверить:
-//   ffmpeg -f ivf -i /tmp/decoder_first_frame.ivf -f rawvideo -pix_fmt rgb24 /tmp/out.rgb
-// Если этот вызов отработает — формат верный, ищем проблему в коде.
-// Если нет — VP8-данные из туннеля битые.
 func (d *Decoder) dumpFirstFrame(vp8Frame []byte) {
 	h := make([]byte, 32)
 	copy(h[0:4], "DKIF")
@@ -225,9 +226,8 @@ func (d *Decoder) Decode(vp8Frame []byte) ([]byte, error) {
 	}
 	d.mu.Unlock()
 
-	// Неблокирующее чтение: если ffmpeg ещё не выдал RGB,
-	// возвращаем nil, а вызывающий пропустит этот кадр.
-	// KCP повторит потерянное, так что ничего не рвётся.
+	// Ждём дольше, чем раньше: 500 мс вместо 150. Этого хватает
+	// даже на keyframes 10842 B при перегрузке.
 	select {
 	case rgb, ok := <-d.frameCh:
 		if !ok {
@@ -239,7 +239,7 @@ func (d *Decoder) Decode(vp8Frame []byte) ([]byte, error) {
 			return nil, io.EOF
 		}
 		return nil, err
-	case <-time.After(150 * time.Millisecond):
+	case <-time.After(decodeTimeout):
 		return nil, nil
 	}
 }

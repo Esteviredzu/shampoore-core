@@ -1,4 +1,3 @@
-// FILE: internal/transport/kcp/session.go
 package kcp
 
 import (
@@ -45,7 +44,15 @@ type Session struct {
 	conv uint32
 	kcp  *kcp.KCP
 
+	// kcpMu защищает ВСЕ вызовы в kcp. xtaci/kcp-go's KCP НЕ
+	// потокобезопасен: Send/Update/Input/Recv/PeekSize мутируют
+	// общее состояние. Без этого мьютекса раса портила
+	// rcv_queue, что давало "tunnel: bad magic" и TLS
+	// "bad record mac" выше по стеку.
+	kcpMu sync.Mutex
+
 	outCount int
+	outMu    sync.Mutex
 
 	ctx     context.Context
 	cancel  context.CancelFunc
@@ -105,35 +112,53 @@ func boolToInt(b bool) int {
 	return 0
 }
 
+// output вызывается из kcp.Update() под s.kcpMu.
+// НЕ должен трогать kcp.* (это дедлок).
 func (s *Session) output(buf []byte, size int) {
-	data := make([]byte, size)
-	copy(data, buf[:size])
-	key := uuid.NewString()
+	// KCP output может содержать несколько сегментов подряд.
+	// Разбиваем на куски, влезающие в maxMessage squares'а,
+	// но так, чтобы каждый кусок состоял из целых сегментов —
+	// тогда kcp.Input на приёмнике сможет разобрать их все.
+	maxChunk := s.pipe.MaxMessageSize()
 
-	s.mu.Lock()
-	s.outCount++
-	n := s.outCount
-	s.mu.Unlock()
-	if n <= 20 || n%100 == 0 {
-		log.Printf("[kcp] output #%d size=%d", n, size)
-	}
+	start := 0
+	for start < size {
+		end := start
+		for end < size {
+			if end+24 > size {
+				break
+			}
+			segLen := 24 + int(binary.LittleEndian.Uint32(buf[end+20:end+24]))
+			if end+segLen > size {
+				break
+			}
+			if end+segLen-start > maxChunk {
+				break
+			}
+			end += segLen
+		}
+		if end == start {
+			// Не влезает даже один сегмент — отправляем как есть.
+			end = size
+		}
 
-	if err := s.pipe.SendMessage(s.ctx, data, key); err != nil {
-		s.logger.Warn("kcp: output send error: ", err)
-	}
-}
+		data := make([]byte, end-start)
+		copy(data, buf[start:end])
 
-func trimPadding(data []byte) []byte {
-	const kcpOverhead = 24
-	if len(data) < kcpOverhead {
-		return data
+		s.outMu.Lock()
+		s.outCount++
+		n := s.outCount
+		s.outMu.Unlock()
+		if n <= 20 || n%100 == 0 {
+			log.Printf("[kcp] output #%d size=%d", n, end-start)
+		}
+
+		key := uuid.NewString()
+		if err := s.pipe.SendMessage(s.ctx, data, key); err != nil {
+			s.logger.Warn("kcp: output send error: ", err)
+		}
+		start = end
 	}
-	payloadLen := int(binary.LittleEndian.Uint32(data[20:24]))
-	total := kcpOverhead + payloadLen
-	if total >= kcpOverhead && total <= len(data) {
-		return data[:total]
-	}
-	return data
 }
 
 func (s *Session) Start(ctx context.Context) error {
@@ -181,8 +206,9 @@ func (s *Session) recvLoop() {
 			log.Printf("[kcp] input #%d size=%d", inCount, len(data))
 		}
 
-		seg := trimPadding(data)
-		s.kcp.Input(seg, kcp.IKCP_PACKET_REGULAR, false)
+		s.kcpMu.Lock()
+		s.kcp.Input(data, kcp.IKCP_PACKET_REGULAR, false)
+		s.kcpMu.Unlock()
 	}
 }
 
@@ -196,7 +222,9 @@ func (s *Session) updateLoop() {
 		case <-s.ctx.Done():
 			return
 		case <-ticker.C:
+			s.kcpMu.Lock()
 			s.kcp.Update()
+			s.kcpMu.Unlock()
 		}
 	}
 }
@@ -211,7 +239,10 @@ func (s *Session) Send(ctx context.Context, data []byte) error {
 	default:
 	}
 
-	if ret := s.kcp.Send(data); ret < 0 {
+	s.kcpMu.Lock()
+	ret := s.kcp.Send(data)
+	s.kcpMu.Unlock()
+	if ret < 0 {
 		return errors.New("kcp: send failed")
 	}
 	return nil
@@ -232,8 +263,10 @@ func (s *Session) Receive(ctx context.Context) ([]byte, error) {
 			return nil, io.EOF
 		}
 
+		s.kcpMu.Lock()
 		size := s.kcp.PeekSize()
 		if size < 0 {
+			s.kcpMu.Unlock()
 			select {
 			case <-ctx.Done():
 				return nil, ctx.Err()
@@ -244,19 +277,19 @@ func (s *Session) Receive(ctx context.Context) ([]byte, error) {
 
 		buf := make([]byte, size)
 		n := s.kcp.Recv(buf)
+		if n == -2 {
+			buf = make([]byte, size+1024)
+			n = s.kcp.Recv(buf)
+		}
+		s.kcpMu.Unlock()
+
 		if n < 0 {
-			if n == -2 {
-				buf = make([]byte, size+1024)
-				n = s.kcp.Recv(buf)
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(5 * time.Millisecond):
 			}
-			if n < 0 {
-				select {
-				case <-ctx.Done():
-					return nil, ctx.Err()
-				case <-time.After(5 * time.Millisecond):
-				}
-				continue
-			}
+			continue
 		}
 
 		out := make([]byte, n)

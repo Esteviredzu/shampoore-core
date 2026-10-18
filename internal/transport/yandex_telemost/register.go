@@ -26,8 +26,8 @@ func init() {
 		"kcp_nc":       true,
 		
 		"squares_cell_size": 16,
-		"squares_cols":      60,
-		"squares_rows":      40,
+		"squares_cols":      120,
+		"squares_rows":      80,
 		"squares_fps":       30,
 		"squares_bitrate":   "4000K",
 		"squares_copies":    1,
