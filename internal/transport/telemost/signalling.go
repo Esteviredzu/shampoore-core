@@ -1,4 +1,3 @@
-// FILE: internal/transport/yandex_telemost/signalling.go
 package telemost
 
 import (
@@ -14,8 +13,8 @@ import (
 	"github.com/pion/interceptor"
 	"github.com/pion/webrtc/v4"
 
+	"github.com/Esteviredzu/shampoore-core/internal/core/channel/vp8"
 	"github.com/Esteviredzu/shampoore-core/internal/logging"
-	"github.com/Esteviredzu/shampoore-core/internal/transport/vp8"
 )
 
 const (
@@ -140,6 +139,21 @@ func (s *signaling) Run(ctx context.Context) error {
 		return err
 	}
 	defer s.closeWS()
+
+	// Close the WS when either ctx is cancelled or Close() is invoked,
+	// so the blocking ReadMessage below is unblocked. Without this the
+	// goroutine leaks on ctx cancellation that isn't immediately
+	// followed by Session.Stop -> signaling.Close.
+	runDone := make(chan struct{})
+	defer close(runDone)
+	go func() {
+		select {
+		case <-ctx.Done():
+			s.closeWS()
+		case <-s.closed:
+		case <-runDone:
+		}
+	}()
 
 	if err := s.sendHello(); err != nil {
 		return fmt.Errorf("telemost: send hello: %w", err)
@@ -742,6 +756,9 @@ func (s *signaling) sendICE(c *webrtc.ICECandidate, target string, pcSeq int) {
 func (s *signaling) Close() {
 	s.closeOnce.Do(func() { close(s.closed) })
 	s.closeWS()
+	if s.tunnel != nil {
+		_ = s.tunnel.Close()
+	}
 	if s.pubPC != nil {
 		_ = s.pubPC.Close()
 	}

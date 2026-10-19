@@ -1,4 +1,3 @@
-// FILE: internal/transport/yandex_telemost/pipe.go
 package telemost
 
 import (
@@ -8,8 +7,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Esteviredzu/shampoore-core/internal/core/channel/vp8"
 	"github.com/Esteviredzu/shampoore-core/internal/logging"
-	"github.com/Esteviredzu/shampoore-core/internal/transport/vp8"
 )
 
 const (

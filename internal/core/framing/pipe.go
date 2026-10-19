@@ -1,4 +1,4 @@
-package squares
+package framing
 
 import (
 	"context"
@@ -12,8 +12,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/Esteviredzu/shampoore-core/internal/core/channel"
 	"github.com/Esteviredzu/shampoore-core/internal/transport"
-	"github.com/Esteviredzu/shampoore-core/internal/transport/vp8"
 )
 
 const (
@@ -42,10 +42,10 @@ func DefaultConfig() Config {
 }
 
 type Pipe struct {
-	tunnel *vp8.Tunnel
-	cfg    Config
-	enc    VideoEncoder
-	dec    VideoDecoder
+	ch  channel.MediaChannel
+	cfg Config
+	enc VideoEncoder
+	dec VideoDecoder
 
 	cells        int
 	payloadBytes int
@@ -76,9 +76,9 @@ type Pipe struct {
 	stFull   atomic.Int64
 }
 
-func NewPipe(tunnel *vp8.Tunnel, cfg Config) (*Pipe, error) {
-	if tunnel == nil {
-		return nil, errors.New("squares: nil tunnel")
+func NewPipe(ch channel.MediaChannel, cfg Config) (*Pipe, error) {
+	if ch == nil {
+		return nil, errors.New("framing: nil media channel")
 	}
 
 	if cfg.CellSize <= 0 {
@@ -103,11 +103,11 @@ func NewPipe(tunnel *vp8.Tunnel, cfg Config) (*Pipe, error) {
 		cfg.Height = autoH
 	}
 	if cfg.Width < cfg.Cols*cfg.CellSize {
-		return nil, fmt.Errorf("squares: frame width %d < active %d",
+		return nil, fmt.Errorf("framing: frame width %d < active %d",
 			cfg.Width, cfg.Cols*cfg.CellSize)
 	}
 	if cfg.Height < cfg.Rows*cfg.CellSize {
-		return nil, fmt.Errorf("squares: frame height %d < active %d",
+		return nil, fmt.Errorf("framing: frame height %d < active %d",
 			cfg.Height, cfg.Rows*cfg.CellSize)
 	}
 	if cfg.FPS <= 0 {
@@ -121,7 +121,7 @@ func NewPipe(tunnel *vp8.Tunnel, cfg Config) (*Pipe, error) {
 	}
 
 	return &Pipe{
-		tunnel:       tunnel,
+		ch:           ch,
 		cfg:          cfg,
 		cells:        cfg.Cols * cfg.Rows,
 		payloadBytes: payloadBytes,
@@ -173,20 +173,20 @@ func (p *Pipe) Stop(ctx context.Context) error {
 	return nil
 }
 
-func (p *Pipe) SessionID() string                                   { return "squares" }
+func (p *Pipe) SessionID() string                                   { return "framing" }
 func (p *Pipe) MaxMessageSize() int                                 { return p.maxMessage }
 func (p *Pipe) DeleteMessage(ctx context.Context, key string) error { return nil }
 func (p *Pipe) SetSharing(on bool)                                  { p.sharing = on }
 
 func (p *Pipe) SendMessage(ctx context.Context, data []byte, key string) error {
 	if !p.started {
-		return errors.New("squares: pipe not started")
+		return errors.New("framing: pipe not started")
 	}
 	if len(data) == 0 {
 		return nil
 	}
 	if len(data) > p.maxMessage {
-		return fmt.Errorf("squares: message too large (%d > %d)",
+		return fmt.Errorf("framing: message too large (%d > %d)",
 			len(data), p.maxMessage)
 	}
 	cp := make([]byte, len(data))
@@ -199,11 +199,11 @@ func (p *Pipe) SendMessage(ctx context.Context, data []byte, key string) error {
 	case <-t.C:
 		n := p.stFull.Add(1)
 		if n <= 5 || n%100 == 0 {
-			log.Printf("[squares] send queue FULL (%d bytes pending), "+
+			log.Printf("[framing] send queue FULL (%d bytes pending), "+
 				"dropping %d bytes — KCP will retransmit (total drops=%d)",
 				len(p.sendCh), len(cp), n)
 		}
-		return errors.New("squares: send queue full")
+		return errors.New("framing: send queue full")
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-p.ctx.Done():
@@ -247,7 +247,7 @@ func (p *Pipe) sendLoop() {
 			if p.ctx.Err() != nil {
 				return
 			}
-			log.Printf("[squares] send error: %v", err)
+			log.Printf("[framing] send error: %v", err)
 		}
 	}
 }
@@ -314,22 +314,32 @@ func (p *Pipe) emit(payload []byte, label string) error {
 		p.cfg.CellSize, payload)
 	frame, err := p.enc.Encode(rgb)
 	if err != nil {
-		return fmt.Errorf("squares: encode: %w", err)
+		return fmt.Errorf("framing: encode: %w", err)
 	}
+
+	var werr error
 	if p.sharing {
-		err = p.tunnel.WriteSharingVP8(frame)
+		type sharingWriter interface {
+			WriteSharingVP8([]byte) error
+		}
+		if sw, ok := p.ch.(sharingWriter); ok {
+			werr = sw.WriteSharingVP8(frame)
+		} else {
+			werr = p.ch.WriteRawVP8(frame)
+		}
 	} else {
-		err = p.tunnel.WriteRawVP8(frame)
+		werr = p.ch.WriteRawVP8(frame)
 	}
-	if err != nil {
-		return fmt.Errorf("squares: write: %w", err)
+	if werr != nil {
+		return fmt.Errorf("framing: write: %w", werr)
 	}
+
 	n := p.stFrames.Add(1)
 	p.stBytes.Add(int64(len(frame)))
 	if label != "" {
-		log.Printf("[squares] SEND %s vp8=%d", label, len(frame))
+		log.Printf("[framing] SEND %s vp8=%d", label, len(frame))
 	} else if n%300 == 1 {
-		log.Printf("[squares] SEND idle seq=%d vp8=%d (frames=%d avg=%.0fB)",
+		log.Printf("[framing] SEND idle seq=%d vp8=%d (frames=%d avg=%.0fB)",
 			p.idleSeq, len(frame), n,
 			float64(p.stBytes.Load())/float64(n))
 	}
@@ -370,17 +380,17 @@ func (p *Pipe) recvLoop() {
 			return
 		default:
 		}
-		raw, err := p.tunnel.Receive(p.ctx)
+		raw, err := p.ch.Receive(p.ctx)
 		if err != nil {
 			if p.ctx.Err() == nil {
-				log.Printf("[squares] recv loop exit: %v", err)
+				log.Printf("[framing] recv loop exit: %v", err)
 			}
 			return
 		}
 		frameCount++
 		rgb, err := p.dec.Decode(raw)
 		if err != nil {
-			log.Printf("[squares] recv #%d vp8=%d DECODE-FAIL: %v",
+			log.Printf("[framing] recv #%d vp8=%d DECODE-FAIL: %v",
 				frameCount, len(raw), err)
 			continue
 		}
@@ -395,19 +405,19 @@ func (p *Pipe) recvLoop() {
 		length := binary.LittleEndian.Uint32(payload[0:4])
 		if length == 0 {
 			if frameCount <= 20 || frameCount%600 == 0 {
-				log.Printf("[squares] recv #%d idle", frameCount)
+				log.Printf("[framing] recv #%d idle", frameCount)
 			}
 			continue
 		}
 		if int(length) > p.maxData {
-			log.Printf("[squares] recv #%d BAD-LEN len=%d max=%d",
+			log.Printf("[framing] recv #%d BAD-LEN len=%d max=%d",
 				frameCount, length, p.maxData)
 			continue
 		}
 		crcGot := binary.LittleEndian.Uint32(payload[4:8])
 		data := payload[HdrLen : HdrLen+int(length)]
 		if crc32.ChecksumIEEE(data) != crcGot {
-			log.Printf("[squares] recv #%d CRC-FAIL len=%d", frameCount, length)
+			log.Printf("[framing] recv #%d CRC-FAIL len=%d", frameCount, length)
 			continue
 		}
 		off := 0
@@ -419,7 +429,7 @@ func (p *Pipe) recvLoop() {
 				break
 			}
 			if off+mlen > len(data) {
-				log.Printf("[squares] recv #%d truncated record (%d+%d > %d)",
+				log.Printf("[framing] recv #%d truncated record (%d+%d > %d)",
 					frameCount, off, mlen, len(data))
 				break
 			}
@@ -433,7 +443,7 @@ func (p *Pipe) recvLoop() {
 				return
 			}
 		}
-		log.Printf("[squares] recv #%d OK msgs=%d bytes=%d", frameCount, n, length)
+		log.Printf("[framing] recv #%d OK msgs=%d bytes=%d", frameCount, n, length)
 	}
 }
 

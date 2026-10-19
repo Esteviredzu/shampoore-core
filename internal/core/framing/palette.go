@@ -1,4 +1,4 @@
-package squares
+package framing
 
 var Palette = [16][3]byte{
 	{8, 8, 8},
@@ -18,7 +18,5 @@ var Palette = [16][3]byte{
 	{232, 232, 232},
 	{248, 248, 248},
 }
-
-
 
 var IdleBG = [3]byte{24, 24, 24}

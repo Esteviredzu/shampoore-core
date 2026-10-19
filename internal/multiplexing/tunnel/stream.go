@@ -9,10 +9,6 @@ import (
 	"time"
 )
 
-// maxQueuedBytes — жёсткий потолок на накопленную очередь непрочитанных
-// данных в одном потоке. При превышении поток закрывается с явной ошибкой
-// (см. deliverData) — это гораздо лучше, чем продолжать расти в память
-// до OOM. При нормальной работе очередь почти всегда пуста.
 const maxQueuedBytes = 64 * 1024 * 1024
 
 type TunnelStream struct {
@@ -20,18 +16,12 @@ type TunnelStream struct {
 	id       string
 	metadata map[string]any
 
-	// Входящая очередь заменяет ограниченный канал recvCh.
-	// Причина: старый вариант на chan с буфером 256 + select/default
-	// МОЛЧА терял куски потока при перегрузке. Для TCP-семантики это
-	// фатально: получатель (curl/TLS, HTTP/2, SOCKS5-клиент) видит
-	// непрерывный поток, но в нём есть дыры — и ломается на парсинге.
-	// Unbounded-очередь под mutex+condvar эту проблему устраняет.
-	recvMu      sync.Mutex
-	recvCond    *sync.Cond
-	recvQueue   [][]byte
-	recvBytes   int
-	recvClosed  bool
-	recvErr     error
+	recvMu     sync.Mutex
+	recvCond   *sync.Cond
+	recvQueue  [][]byte
+	recvBytes  int
+	recvClosed bool
+	recvErr    error
 
 	readBuf []byte
 
@@ -116,7 +106,8 @@ func (s *TunnelStream) Close() error {
 // кладём в unbounded-очередь и будим Read через condvar.
 // Если очередь превысила maxQueuedBytes — закрываем поток с явной
 // ошибкой, чтобы не уехать в OOM. Тогда получатель получит
-// осмысленную ошибку, а не повреждённый поток.
+// осмысленную ошибку, а не повреждённый поток. Дополнительно удаляем
+// стрим из mux.streams, чтобы не оставлять «мёртвый» entry в map.
 func (s *TunnelStream) deliverData(data []byte) {
 	s.recvMu.Lock()
 	if s.recvClosed {
@@ -128,6 +119,12 @@ func (s *TunnelStream) deliverData(data []byte) {
 		s.recvErr = errors.New("tunnel: receive queue overflow")
 		s.recvCond.Broadcast()
 		s.recvMu.Unlock()
+
+		if s.mux != nil {
+			s.mux.mu.Lock()
+			delete(s.mux.streams, s.id)
+			s.mux.mu.Unlock()
+		}
 		return
 	}
 	s.recvBytes += len(data)

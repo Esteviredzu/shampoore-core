@@ -1,4 +1,4 @@
-package squares
+package framing
 
 type VideoEncoder interface {
 	Encode(rgb []byte) (vp8 []byte, err error)

@@ -1,6 +1,6 @@
 //go:build linux
 
-package squares
+package framing
 
 import (
 	"encoding/binary"
@@ -28,7 +28,7 @@ var _ VideoEncoder = (*ffmpegEncoder)(nil)
 
 func NewEncoder(width, height, fps int, bitrate string) (VideoEncoder, error) {
 	if width <= 0 || height <= 0 {
-		return nil, errors.New("squares/encoder: bad dimensions")
+		return nil, errors.New("framing/encoder: bad dimensions")
 	}
 	if fps <= 0 {
 		fps = 30
@@ -72,14 +72,14 @@ func (e *ffmpegEncoder) start() error {
 	cmd.Stderr = io.Discard
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
-		return fmt.Errorf("squares/encoder: stdin: %w", err)
+		return fmt.Errorf("framing/encoder: stdin: %w", err)
 	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return fmt.Errorf("squares/encoder: stdout: %w", err)
+		return fmt.Errorf("framing/encoder: stdout: %w", err)
 	}
 	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("squares/encoder: start: %w", err)
+		return fmt.Errorf("framing/encoder: start: %w", err)
 	}
 	e.cmd = cmd
 	e.stdin = stdin
@@ -91,42 +91,42 @@ func (e *ffmpegEncoder) Encode(rgb []byte) ([]byte, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.dead {
-		return nil, errors.New("squares/encoder: closed")
+		return nil, errors.New("framing/encoder: closed")
 	}
 	want := e.width * e.height * 3
 	if len(rgb) != want {
-		return nil, fmt.Errorf("squares/encoder: bad rgb size %d, want %d", len(rgb), want)
+		return nil, fmt.Errorf("framing/encoder: bad rgb size %d, want %d", len(rgb), want)
 	}
 	if _, err := e.stdin.Write(rgb); err != nil {
 		e.dead = true
-		return nil, fmt.Errorf("squares/encoder: write rgb: %w", err)
+		return nil, fmt.Errorf("framing/encoder: write rgb: %w", err)
 	}
 	if !e.headerRead {
 		header := make([]byte, 32)
 		if _, err := io.ReadFull(e.stdout, header); err != nil {
 			e.dead = true
-			return nil, fmt.Errorf("squares/encoder: read ivf header: %w", err)
+			return nil, fmt.Errorf("framing/encoder: read ivf header: %w", err)
 		}
 		if string(header[0:4]) != "DKIF" {
 			e.dead = true
-			return nil, fmt.Errorf("squares/encoder: bad ivf magic %q", header[0:4])
+			return nil, fmt.Errorf("framing/encoder: bad ivf magic %q", header[0:4])
 		}
 		e.headerRead = true
 	}
 	fh := make([]byte, 12)
 	if _, err := io.ReadFull(e.stdout, fh); err != nil {
 		e.dead = true
-		return nil, fmt.Errorf("squares/encoder: read frame header: %w", err)
+		return nil, fmt.Errorf("framing/encoder: read frame header: %w", err)
 	}
 	size := binary.LittleEndian.Uint32(fh[0:4])
 	if size == 0 || size > 1<<22 {
 		e.dead = true
-		return nil, fmt.Errorf("squares/encoder: bad frame size %d", size)
+		return nil, fmt.Errorf("framing/encoder: bad frame size %d", size)
 	}
 	frame := make([]byte, size)
 	if _, err := io.ReadFull(e.stdout, frame); err != nil {
 		e.dead = true
-		return nil, fmt.Errorf("squares/encoder: read frame: %w", err)
+		return nil, fmt.Errorf("framing/encoder: read frame: %w", err)
 	}
 	return frame, nil
 }

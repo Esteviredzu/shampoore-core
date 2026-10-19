@@ -25,7 +25,7 @@ func BuildRuntime(
 		return nil, err
 	}
 
-	rt := NewRuntime(res.Transport, res.BypassHosts, res.Side)
+	rt := NewRuntime(res.Transport, res.Provider, res.BypassHosts, res.Side)
 	rt.MuxConfig = MuxConfig{
 		FlushMs:        eff.Int("mux_flush_ms", 20),
 		FlushThreshold: eff.Int("mux_flush_threshold", 12000),

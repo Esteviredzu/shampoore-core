@@ -161,7 +161,7 @@ func (s *RemoteHandler) handleStream(stream multiplexing.Stream) {
 		for {
 			n, err := conn.Read(buf)
 			if n > 0 {
-				s.logger.Info("remote: ", streamID, " upstream->stream ",
+				s.logger.Debug("remote: ", streamID, " upstream->stream ",
 					n, " bytes")
 				if _, werr := stream.Write(buf[:n]); werr != nil {
 					s.logger.Warn("remote: ", streamID,
@@ -170,7 +170,7 @@ func (s *RemoteHandler) handleStream(stream multiplexing.Stream) {
 				}
 			}
 			if err != nil {
-				s.logger.Info("remote: ", streamID,
+				s.logger.Debug("remote: ", streamID,
 					" conn.Read ended: ", err)
 				return
 			}
@@ -184,7 +184,7 @@ func (s *RemoteHandler) handleStream(stream multiplexing.Stream) {
 		for {
 			n, err := stream.Read(buf)
 			if n > 0 {
-				s.logger.Info("remote: ", streamID, " stream->upstream ",
+				s.logger.Debug("remote: ", streamID, " stream->upstream ",
 					n, " bytes")
 				if _, werr := conn.Write(buf[:n]); werr != nil {
 					s.logger.Warn("remote: ", streamID,
@@ -193,7 +193,7 @@ func (s *RemoteHandler) handleStream(stream multiplexing.Stream) {
 				}
 			}
 			if err != nil {
-				s.logger.Info("remote: ", streamID,
+				s.logger.Debug("remote: ", streamID,
 					" stream.Read ended: ", err)
 				return
 			}

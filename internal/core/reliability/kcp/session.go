@@ -44,11 +44,6 @@ type Session struct {
 	conv uint32
 	kcp  *kcp.KCP
 
-	// kcpMu защищает ВСЕ вызовы в kcp. xtaci/kcp-go's KCP НЕ
-	// потокобезопасен: Send/Update/Input/Recv/PeekSize мутируют
-	// общее состояние. Без этого мьютекса раса портила
-	// rcv_queue, что давало "tunnel: bad magic" и TLS
-	// "bad record mac" выше по стеку.
 	kcpMu sync.Mutex
 
 	outCount int
@@ -112,13 +107,7 @@ func boolToInt(b bool) int {
 	return 0
 }
 
-// output вызывается из kcp.Update() под s.kcpMu.
-// НЕ должен трогать kcp.* (это дедлок).
 func (s *Session) output(buf []byte, size int) {
-	// KCP output может содержать несколько сегментов подряд.
-	// Разбиваем на куски, влезающие в maxMessage squares'а,
-	// но так, чтобы каждый кусок состоял из целых сегментов —
-	// тогда kcp.Input на приёмнике сможет разобрать их все.
 	maxChunk := s.pipe.MaxMessageSize()
 
 	start := 0
@@ -138,7 +127,6 @@ func (s *Session) output(buf []byte, size int) {
 			end += segLen
 		}
 		if end == start {
-			// Не влезает даже один сегмент — отправляем как есть.
 			end = size
 		}
 

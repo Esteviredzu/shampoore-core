@@ -1,5 +1,4 @@
-// FILE: internal/transport/codec.go
-package transport
+package reliability
 
 import (
 	"encoding/binary"
@@ -146,9 +145,6 @@ func (c *ReliableCodec) Decode(buf []byte) *DecodedPacket {
 
 	payloadLen := int(binary.BigEndian.Uint32(buf[63:67]))
 
-	// payloadLen может быть МЕНЬШЕ len(buf)-headerSize, если вышележащий
-	// слой (например, SquaresPipe) дополнил сообщение padding'ом.
-	// Больше — не может, это битый пакет.
 	if payloadLen < 0 || payloadLen > len(buf)-headerSize {
 		return nil
 	}

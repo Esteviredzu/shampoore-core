@@ -85,8 +85,6 @@ func bootstrap(ctx context.Context, cfg *Config) (*bootstrapResult, error) {
 	}, nil
 }
 
-// fakeBootstrap возвращает синтетический bootstrapResult для локального
-// signaling-сервера. Никаких HTTP-запросов к Yandex не делается.
 func fakeBootstrap(url string) *bootstrapResult {
 	return &bootstrapResult{
 		info: &ConferenceInfo{

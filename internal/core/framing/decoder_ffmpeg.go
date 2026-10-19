@@ -1,6 +1,6 @@
 //go:build linux
 
-package squares
+package framing
 
 import (
 	"encoding/binary"
@@ -44,7 +44,7 @@ var _ VideoDecoder = (*ffmpegDecoder)(nil)
 
 func NewDecoder(width, height, fps int) (VideoDecoder, error) {
 	if width <= 0 || height <= 0 {
-		return nil, errors.New("squares/decoder: bad dimensions")
+		return nil, errors.New("framing/decoder: bad dimensions")
 	}
 	if fps <= 0 {
 		fps = 30
@@ -72,14 +72,14 @@ func (d *ffmpegDecoder) start() error {
 	cmd.Stderr = os.Stderr
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
-		return fmt.Errorf("squares/decoder: stdin: %w", err)
+		return fmt.Errorf("framing/decoder: stdin: %w", err)
 	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return fmt.Errorf("squares/decoder: stdout: %w", err)
+		return fmt.Errorf("framing/decoder: stdout: %w", err)
 	}
 	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("squares/decoder: start: %w", err)
+		return fmt.Errorf("framing/decoder: start: %w", err)
 	}
 	d.cmd = cmd
 	d.stdin = stdin
@@ -104,7 +104,7 @@ func (d *ffmpegDecoder) writeIVFHeader() error {
 	binary.LittleEndian.PutUint32(h[20:24], 1)
 	_, err := d.stdin.Write(h)
 	if err != nil {
-		log.Printf("[squares/decoder] write IVF header failed: %v", err)
+		log.Printf("[framing/decoder] write IVF header failed: %v", err)
 	}
 	return err
 }
@@ -118,7 +118,7 @@ func (d *ffmpegDecoder) readLoop() {
 	for {
 		rgb := make([]byte, frameSize)
 		if _, err := io.ReadFull(d.stdout, rgb); err != nil {
-			log.Printf("[squares/decoder] readLoop exit after %d frames: %v",
+			log.Printf("[framing/decoder] readLoop exit after %d frames: %v",
 				d.statsOut, err)
 			select {
 			case d.errCh <- err:
@@ -131,14 +131,14 @@ func (d *ffmpegDecoder) readLoop() {
 		n := d.statsOut
 		d.mu.Unlock()
 		if n == 1 {
-			log.Printf("[squares/decoder] FIRST RGB frame produced")
+			log.Printf("[framing/decoder] FIRST RGB frame produced")
 		} else if n%50 == 0 {
-			log.Printf("[squares/decoder] decoded %d frames, ffmpeg keeps up", n)
+			log.Printf("[framing/decoder] decoded %d frames, ffmpeg keeps up", n)
 		}
 		select {
 		case d.frameCh <- rgb:
 		case <-time.After(decodeTimeout):
-			log.Printf("[squares/decoder] WARNING: frame dropped, "+
+			log.Printf("[framing/decoder] WARNING: frame dropped, "+
 				"consumer stalled > %v", decodeTimeout)
 		}
 	}
@@ -172,10 +172,10 @@ func (d *ffmpegDecoder) dumpFirstFrame(vp8Frame []byte) {
 
 	path := "/tmp/decoder_first_frame.ivf"
 	if err := os.WriteFile(path, full, 0644); err != nil {
-		log.Printf("[squares/decoder] dump first frame: %v", err)
+		log.Printf("[framing/decoder] dump first frame: %v", err)
 		return
 	}
-	log.Printf("[squares/decoder] first VP8 frame (%d B) dumped to %s — проверить: ffmpeg -f ivf -i %s -f null -",
+	log.Printf("[framing/decoder] first VP8 frame (%d B) dumped to %s — проверить: ffmpeg -f ivf -i %s -f null -",
 		len(vp8Frame), path, path)
 }
 
@@ -183,7 +183,7 @@ func (d *ffmpegDecoder) Decode(vp8Frame []byte) ([]byte, error) {
 	d.mu.Lock()
 	if d.closed {
 		d.mu.Unlock()
-		return nil, errors.New("squares/decoder: closed")
+		return nil, errors.New("framing/decoder: closed")
 	}
 	if d.needKey {
 		if !isVP8Keyframe(vp8Frame) {
@@ -196,7 +196,7 @@ func (d *ffmpegDecoder) Decode(vp8Frame []byte) ([]byte, error) {
 	d.statsIn++
 	inN := d.statsIn
 	if inN <= 5 || inN%200 == 0 {
-		log.Printf("[squares/decoder] in #%d size=%d (out=%d)",
+		log.Printf("[framing/decoder] in #%d size=%d (out=%d)",
 			inN, len(vp8Frame), d.statsOut)
 	}
 
@@ -213,16 +213,16 @@ func (d *ffmpegDecoder) Decode(vp8Frame []byte) ([]byte, error) {
 	d.frameIdx++
 
 	if _, err := d.stdin.Write(fh); err != nil {
-		log.Printf("[squares/decoder] stdin write header err: %v", err)
+		log.Printf("[framing/decoder] stdin write header err: %v", err)
 		d.needKey = true
 		d.mu.Unlock()
-		return nil, fmt.Errorf("squares/decoder: write header: %w", err)
+		return nil, fmt.Errorf("framing/decoder: write header: %w", err)
 	}
 	if _, err := d.stdin.Write(vp8Frame); err != nil {
-		log.Printf("[squares/decoder] stdin write frame err: %v", err)
+		log.Printf("[framing/decoder] stdin write frame err: %v", err)
 		d.needKey = true
 		d.mu.Unlock()
-		return nil, fmt.Errorf("squares/decoder: write frame: %w", err)
+		return nil, fmt.Errorf("framing/decoder: write frame: %w", err)
 	}
 	d.mu.Unlock()
 

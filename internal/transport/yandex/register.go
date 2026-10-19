@@ -6,9 +6,10 @@ import (
 	"time"
 
 	"github.com/Esteviredzu/shampoore-core/internal/app"
+	"github.com/Esteviredzu/shampoore-core/internal/core/reliability"
+	"github.com/Esteviredzu/shampoore-core/internal/core/security"
 	"github.com/Esteviredzu/shampoore-core/internal/logging"
 	"github.com/Esteviredzu/shampoore-core/internal/transport"
-	"github.com/Esteviredzu/shampoore-core/internal/transport/security"
 )
 
 func init() {
@@ -73,8 +74,7 @@ func buildTransport(
 		return nil, err
 	}
 
-	heartbeatCtx, _ := context.WithCancel(context.Background())
-	client.StartPeriodicHeartbeat(heartbeatCtx)
+	client.StartPeriodicHeartbeat(ctx)
 
 	pipeCfg := DefaultPipeConfig()
 	pipeCfg.QueueSize = cfg.PipeQueue
@@ -113,7 +113,7 @@ func buildTransport(
 		logger.Info("yandex: jitter enabled")
 	}
 
-	session, err := transport.NewReliableSession(pipe, logger, transport.Config{
+	session, err := reliability.NewReliableSession(pipe, logger, reliability.Config{
 		Window:    eff.Int("reliable_window", 64),
 		ChunkSize: eff.Int("reliable_chunk", 0),
 	})
