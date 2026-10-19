@@ -1,3 +1,5 @@
+//go:build linux
+
 package squares
 
 import (
@@ -12,28 +14,25 @@ import (
 	"time"
 )
 
-// decodeTimeout — сколько ждём RGB от ffmpeg. Раньше было 150 мс,
-// и этого не хватало на keyframes (10+ KB) — они пропускались
-// молча, а вместе с ними и весь TCP-поток.
 const (
 	decodeTimeout = 500 * time.Millisecond
 	frameQueueLen = 32
 )
 
-type Decoder struct {
+type ffmpegDecoder struct {
 	width, height int
 	fps           int
 
-	mu        sync.Mutex
-	cmd       *exec.Cmd
-	stdin     io.WriteCloser
-	stdout    io.ReadCloser
-	frameCh   chan []byte
-	errCh     chan error
-	closed    bool
-	dumped    bool
-	statsIn   int
-	statsOut  int
+	mu       sync.Mutex
+	cmd      *exec.Cmd
+	stdin    io.WriteCloser
+	stdout   io.ReadCloser
+	frameCh  chan []byte
+	errCh    chan error
+	closed   bool
+	dumped   bool
+	statsIn  int
+	statsOut int
 
 	needKey  bool
 	frameIdx uint64
@@ -41,14 +40,16 @@ type Decoder struct {
 	closeOnce sync.Once
 }
 
-func NewDecoder(width, height, fps int) (*Decoder, error) {
+var _ VideoDecoder = (*ffmpegDecoder)(nil)
+
+func NewDecoder(width, height, fps int) (VideoDecoder, error) {
 	if width <= 0 || height <= 0 {
 		return nil, errors.New("squares/decoder: bad dimensions")
 	}
 	if fps <= 0 {
 		fps = 30
 	}
-	d := &Decoder{
+	d := &ffmpegDecoder{
 		width:   width,
 		height:  height,
 		fps:     fps,
@@ -62,7 +63,7 @@ func NewDecoder(width, height, fps int) (*Decoder, error) {
 	return d, nil
 }
 
-func (d *Decoder) start() error {
+func (d *ffmpegDecoder) start() error {
 	cmd := exec.Command("ffmpeg",
 		"-loglevel", "error",
 		"-f", "ivf", "-i", "-",
@@ -94,7 +95,7 @@ func (d *Decoder) start() error {
 	return nil
 }
 
-func (d *Decoder) writeIVFHeader() error {
+func (d *ffmpegDecoder) writeIVFHeader() error {
 	h := make([]byte, 32)
 	copy(h[0:4], "DKIF")
 	binary.LittleEndian.PutUint16(h[6:8], 32)
@@ -108,7 +109,7 @@ func (d *Decoder) writeIVFHeader() error {
 	return err
 }
 
-func (d *Decoder) readLoop() {
+func (d *ffmpegDecoder) readLoop() {
 	frameSize := d.width * d.height * 3
 	defer func() {
 		close(d.frameCh)
@@ -134,7 +135,6 @@ func (d *Decoder) readLoop() {
 		} else if n%50 == 0 {
 			log.Printf("[squares/decoder] decoded %d frames, ffmpeg keeps up", n)
 		}
-		// БЛОКИРУЮЩИЙ send: пусть ffmpeg притормозит, но ничего не потеряем.
 		select {
 		case d.frameCh <- rgb:
 		case <-time.After(decodeTimeout):
@@ -151,7 +151,7 @@ func isVP8Keyframe(data []byte) bool {
 	return (data[0] & 0x01) == 0
 }
 
-func (d *Decoder) dumpFirstFrame(vp8Frame []byte) {
+func (d *ffmpegDecoder) dumpFirstFrame(vp8Frame []byte) {
 	h := make([]byte, 32)
 	copy(h[0:4], "DKIF")
 	binary.LittleEndian.PutUint16(h[6:8], 32)
@@ -179,7 +179,7 @@ func (d *Decoder) dumpFirstFrame(vp8Frame []byte) {
 		len(vp8Frame), path, path)
 }
 
-func (d *Decoder) Decode(vp8Frame []byte) ([]byte, error) {
+func (d *ffmpegDecoder) Decode(vp8Frame []byte) ([]byte, error) {
 	d.mu.Lock()
 	if d.closed {
 		d.mu.Unlock()
@@ -226,8 +226,6 @@ func (d *Decoder) Decode(vp8Frame []byte) ([]byte, error) {
 	}
 	d.mu.Unlock()
 
-	// Ждём дольше, чем раньше: 500 мс вместо 150. Этого хватает
-	// даже на keyframes 10842 B при перегрузке.
 	select {
 	case rgb, ok := <-d.frameCh:
 		if !ok {
@@ -244,7 +242,7 @@ func (d *Decoder) Decode(vp8Frame []byte) ([]byte, error) {
 	}
 }
 
-func (d *Decoder) Close() error {
+func (d *ffmpegDecoder) Close() error {
 	d.closeOnce.Do(func() {
 		d.mu.Lock()
 		d.closed = true

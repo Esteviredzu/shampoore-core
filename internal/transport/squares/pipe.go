@@ -21,9 +21,6 @@ const (
 	enqueueTimeout = 500 * time.Millisecond
 )
 
-// Config — конфигурация squares-канала. CellSize — размер клетки в пикселях.
-// Ширина/высота кадра, payloadBytes, maxMessage выводятся из
-// (CellSize, Cols, Rows) в NewPipe. Если Width/Height = 0 — авто.
 type Config struct {
 	Width, Height int
 	Cols, Rows    int
@@ -47,8 +44,8 @@ func DefaultConfig() Config {
 type Pipe struct {
 	tunnel *vp8.Tunnel
 	cfg    Config
-	enc    *Encoder
-	dec    *Decoder
+	enc    VideoEncoder
+	dec    VideoDecoder
 
 	cells        int
 	payloadBytes int

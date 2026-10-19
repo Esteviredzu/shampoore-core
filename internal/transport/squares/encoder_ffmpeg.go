@@ -1,3 +1,5 @@
+//go:build linux
+
 package squares
 
 import (
@@ -9,7 +11,7 @@ import (
 	"sync"
 )
 
-type Encoder struct {
+type ffmpegEncoder struct {
 	width, height int
 	fps           int
 	bitrate       string
@@ -22,7 +24,9 @@ type Encoder struct {
 	closeOnce     sync.Once
 }
 
-func NewEncoder(width, height, fps int, bitrate string) (*Encoder, error) {
+var _ VideoEncoder = (*ffmpegEncoder)(nil)
+
+func NewEncoder(width, height, fps int, bitrate string) (VideoEncoder, error) {
 	if width <= 0 || height <= 0 {
 		return nil, errors.New("squares/encoder: bad dimensions")
 	}
@@ -32,14 +36,14 @@ func NewEncoder(width, height, fps int, bitrate string) (*Encoder, error) {
 	if bitrate == "" {
 		bitrate = "600K"
 	}
-	e := &Encoder{width: width, height: height, fps: fps, bitrate: bitrate}
+	e := &ffmpegEncoder{width: width, height: height, fps: fps, bitrate: bitrate}
 	if err := e.start(); err != nil {
 		return nil, err
 	}
 	return e, nil
 }
 
-func (e *Encoder) start() error {
+func (e *ffmpegEncoder) start() error {
 	args := []string{
 		"-loglevel", "error",
 		"-f", "rawvideo", "-pix_fmt", "rgb24",
@@ -83,7 +87,7 @@ func (e *Encoder) start() error {
 	return nil
 }
 
-func (e *Encoder) Encode(rgb []byte) ([]byte, error) {
+func (e *ffmpegEncoder) Encode(rgb []byte) ([]byte, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.dead {
@@ -127,7 +131,7 @@ func (e *Encoder) Encode(rgb []byte) ([]byte, error) {
 	return frame, nil
 }
 
-func (e *Encoder) Close() error {
+func (e *ffmpegEncoder) Close() error {
 	e.closeOnce.Do(func() {
 		if e.stdin != nil {
 			_ = e.stdin.Close()
