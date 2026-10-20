@@ -18,11 +18,15 @@ var telemostDefaults = app.Values{
 
 	"kcp_conv":     0,
 	"kcp_mtu":      390,
-	"kcp_window":   256,
+	"kcp_window":   512,
 	"kcp_nodelay":  1,
 	"kcp_interval": 5,
-	"kcp_resend":   5,
+	"kcp_resend":   10,
 	"kcp_nc":       true,
+
+	"fec_enabled":       false,
+	"fec_data_shards":   10,
+	"fec_parity_shards": 3,
 
 	"squares_cell_size": 16,
 	"squares_cols":      120,
@@ -86,6 +90,8 @@ func buildTransport(
 	sqBitrate := eff.String("squares_bitrate", "4000K")
 	sqCopies := eff.Int("squares_copies", 1)
 
+	// Плотность упаковки (bits per cell) определяется палитрой.
+	// Grid.DeriveLayout сам посчитает payloadBytes и maxMessage.
 	grid := framing.Grid{
 		CellSize: sqCellSize,
 		Cols:     sqCols,
@@ -107,6 +113,8 @@ func buildTransport(
 
 	logger.Info("telemost: framing grid: ", sqCols, "x", sqRows,
 		" cell=", sqCellSize, "px",
+		" bits=", framing.BitsPerCell,
+		" shades=", len(framing.Palette),
 		" res=", sqW, "x", sqH,
 		" payload=", payloadBytes, "B/frame",
 		" fps=", sqFPS,
@@ -132,9 +140,6 @@ func buildTransport(
 		SquaresBitrate:  sqBitrate,
 		SquaresCopies:   sqCopies,
 
-		// Propagate the user's UseSharing preference from transport
-		// config. Previously this was hard-coded to false, silently
-		// ignoring {"use_sharing": true} in the JSON.
 		UseSharing: cfg.UseSharing,
 	})
 	if err := provider.Start(ctx); err != nil {
@@ -175,6 +180,10 @@ func buildTransport(
 		Interval: eff.Int("kcp_interval", 5),
 		Resend:   eff.Int("kcp_resend", 5),
 		NC:       eff.Bool("kcp_nc", true),
+
+		FECEnabled:      eff.Bool("fec_enabled", false),
+		FECDataShards:   eff.Int("fec_data_shards", 10),
+		FECParityShards: eff.Int("fec_parity_shards", 3),
 	}
 	inner, err := kcp.NewSession(sqPipe, logger, kcpCfg)
 	if err != nil {

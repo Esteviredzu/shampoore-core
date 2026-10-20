@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 	kcp "github.com/xtaci/kcp-go/v5"
 
+	"github.com/Esteviredzu/shampoore-core/internal/core/security"
 	"github.com/Esteviredzu/shampoore-core/internal/logging"
 	"github.com/Esteviredzu/shampoore-core/internal/transport"
 )
@@ -24,6 +25,11 @@ type Config struct {
 	Interval int
 	Resend   int
 	NC       bool
+
+	// FEC (Forward Error Correction)
+	FECEnabled      bool
+	FECDataShards   int
+	FECParityShards int
 }
 
 func DefaultConfig() Config {
@@ -79,6 +85,17 @@ func NewSession(
 	const maxKCPMTU = 1200
 	if cfg.MTU > maxKCPMTU {
 		cfg.MTU = maxKCPMTU
+	}
+
+	// Оборачиваем pipe в FEC, если включено
+	if cfg.FECEnabled {
+		fecPipe, err := security.NewFECPipe(pipe, cfg.FECDataShards, cfg.FECParityShards)
+		if err != nil {
+			return nil, err
+		}
+		pipe = fecPipe
+		logger.Info("kcp: FEC enabled; data_shards=", cfg.FECDataShards,
+			" parity_shards=", cfg.FECParityShards)
 	}
 
 	s := &Session{

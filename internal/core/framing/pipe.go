@@ -51,6 +51,7 @@ type Pipe struct {
 	payloadBytes int
 	maxMessage   int
 	maxData      int
+	hdrCells     int
 
 	frameDur time.Duration
 
@@ -80,7 +81,6 @@ func NewPipe(ch channel.MediaChannel, cfg Config) (*Pipe, error) {
 	if ch == nil {
 		return nil, errors.New("framing: nil media channel")
 	}
-
 	if cfg.CellSize <= 0 {
 		cfg.CellSize = 16
 	}
@@ -91,7 +91,11 @@ func NewPipe(ch channel.MediaChannel, cfg Config) (*Pipe, error) {
 		cfg.Rows = 40
 	}
 
-	grid := Grid{CellSize: cfg.CellSize, Cols: cfg.Cols, Rows: cfg.Rows}
+	grid := Grid{
+		CellSize: cfg.CellSize,
+		Cols:     cfg.Cols,
+		Rows:     cfg.Rows,
+	}
 	autoW, autoH, payloadBytes, maxData, maxMessage, err := grid.DeriveLayout()
 	if err != nil {
 		return nil, err
@@ -127,6 +131,7 @@ func NewPipe(ch channel.MediaChannel, cfg Config) (*Pipe, error) {
 		payloadBytes: payloadBytes,
 		maxMessage:   maxMessage,
 		maxData:      maxData,
+		hdrCells:     HdrCells(),
 		frameDur:     time.Second / time.Duration(cfg.FPS),
 		sendCh:       make(chan []byte, sendQueueCap),
 		recvCh:       make(chan []byte, 512),
@@ -154,6 +159,9 @@ func (p *Pipe) Start(ctx context.Context) error {
 	p.wg.Add(2)
 	go p.recvLoop()
 	go p.sendLoop()
+	log.Printf("[framing] started: %dx%d cells, %d bit/cell (%d shades), payload=%dB/frame, max_msg=%d",
+		p.cfg.Cols, p.cfg.Rows, BitsPerCell, len(Palette),
+		p.payloadBytes, p.maxMessage)
 	return nil
 }
 
@@ -295,14 +303,16 @@ func (p *Pipe) sendIdle() error {
 	p.idleSeq++
 	seq := int(p.idleSeq)
 	payload := make([]byte, p.payloadBytes)
+	shades := len(Palette)
+	bits := BitsPerCell
 	for r := 0; r < p.cfg.Rows; r++ {
 		for c := 0; c < p.cfg.Cols; c++ {
 			idx := r*p.cfg.Cols + c
-			if idx < HdrCells {
+			if idx < p.hdrCells {
 				continue
 			}
-			val := byte((r + c + seq/8) % 16)
-			set4Bit(payload, idx*4, val)
+			val := byte((r + c + seq/8) % shades)
+			setNBits(payload, idx*bits, bits, val)
 		}
 	}
 	return p.emit(payload, "")
@@ -344,18 +354,6 @@ func (p *Pipe) emit(payload []byte, label string) error {
 			float64(p.stBytes.Load())/float64(n))
 	}
 	return nil
-}
-
-func set4Bit(payload []byte, bitPos int, val byte) {
-	bytePos := bitPos >> 3
-	bitOff := uint(bitPos & 7)
-	val &= 0x0F
-	if bytePos < len(payload) {
-		payload[bytePos] |= val << bitOff
-	}
-	if bitOff > 4 && bytePos+1 < len(payload) {
-		payload[bytePos+1] |= val >> (8 - bitOff)
-	}
 }
 
 func (p *Pipe) ReceiveMessage(ctx context.Context) ([]byte, error) {

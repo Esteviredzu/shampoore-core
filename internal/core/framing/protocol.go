@@ -3,10 +3,13 @@ package framing
 import "fmt"
 
 const (
-	HdrLen   = 8
-	RecHdr   = 2
-	HdrCells = HdrLen * 2
+	HdrLen = 8
+	RecHdr = 2
 )
+
+func HdrCells() int {
+	return (HdrLen*8 + BitsPerCell - 1) / BitsPerCell
+}
 
 type Grid struct {
 	CellSize int
@@ -26,13 +29,10 @@ func (g Grid) DeriveLayout() (
 		return 0, 0, 0, 0, 0, fmt.Errorf(
 			"framing: cols/rows must be positive (got %dx%d)", g.Cols, g.Rows)
 	}
-	cells := g.Cols * g.Rows
-	if cells%2 != 0 {
-		return 0, 0, 0, 0, 0, fmt.Errorf(
-			"framing: cells=%d must be even (cols×rows)", cells)
-	}
 
-	payloadBytes = cells / 2
+	cells := g.Cols * g.Rows
+	payloadBytes = (cells*BitsPerCell + 7) / 8
+
 	maxData = payloadBytes - HdrLen
 	maxMessage = maxData - RecHdr
 	if maxMessage < 32 {
