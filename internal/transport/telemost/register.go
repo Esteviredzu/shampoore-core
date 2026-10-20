@@ -28,12 +28,16 @@ var telemostDefaults = app.Values{
 	"fec_data_shards":   10,
 	"fec_parity_shards": 3,
 
-	"squares_cell_size": 16,
-	"squares_cols":      120,
-	"squares_rows":      80,
-	"squares_fps":       30,
-	"squares_bitrate":   "4000K",
-	"squares_copies":    1,
+	// сколько бит кодируем в 1 квадрат
+	// 3 - 8 цветов, 4 - 16 цветов, 5 - 32 цвета и тд
+	// 4 - оптимальный вариант, на 5 лично у меня скорость уже снижается
+	"squares_bits_per_cell": 4,
+	"squares_cell_size":     16,
+	"squares_cols":          120,
+	"squares_rows":          80,
+	"squares_fps":           30,
+	"squares_bitrate":       "4000K",
+	"squares_copies":        1,
 }
 
 func init() {
@@ -57,6 +61,13 @@ func buildTransport(
 	logger logging.ContextLogger,
 	eff app.Values,
 ) (*app.BuildResult, error) {
+	// Палитру необходимо инициализировать ДО любого использования
+	// framing (NewPipe, Grid.DeriveLayout, HdrCells, ...).
+	bitsPerCell := eff.Int("squares_bits_per_cell", 3)
+	if err := framing.InitPalette(bitsPerCell); err != nil {
+		return nil, fmt.Errorf("telemost: bits_per_cell: %w", err)
+	}
+
 	cfg := DefaultConfig()
 	if data := s.TransportData(); len(data) > 0 {
 		if err := json.Unmarshal(data, &cfg); err != nil {
@@ -90,8 +101,6 @@ func buildTransport(
 	sqBitrate := eff.String("squares_bitrate", "4000K")
 	sqCopies := eff.Int("squares_copies", 1)
 
-	// Плотность упаковки (bits per cell) определяется палитрой.
-	// Grid.DeriveLayout сам посчитает payloadBytes и maxMessage.
 	grid := framing.Grid{
 		CellSize: sqCellSize,
 		Cols:     sqCols,
@@ -114,7 +123,7 @@ func buildTransport(
 	logger.Info("telemost: framing grid: ", sqCols, "x", sqRows,
 		" cell=", sqCellSize, "px",
 		" bits=", framing.BitsPerCell,
-		" shades=", len(framing.Palette),
+		" shades=", len(framing.PaletteY),
 		" res=", sqW, "x", sqH,
 		" payload=", payloadBytes, "B/frame",
 		" fps=", sqFPS,

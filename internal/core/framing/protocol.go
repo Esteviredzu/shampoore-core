@@ -21,6 +21,9 @@ func (g Grid) DeriveLayout() (
 	width, height, payloadBytes, maxData, maxMessage int,
 	err error,
 ) {
+	if err := requirePalette("Grid.DeriveLayout"); err != nil {
+		return 0, 0, 0, 0, 0, err
+	}
 	if g.CellSize < 4 || g.CellSize > 32 {
 		return 0, 0, 0, 0, 0, fmt.Errorf(
 			"framing: invalid cell_size %d (want 4..32)", g.CellSize)

@@ -69,7 +69,7 @@ type Pipe struct {
 	idleSeq uint32
 	sharing bool
 
-	rgbBuf []byte
+	yuvBuf []byte
 
 	stFrames atomic.Int64
 	stBytes  atomic.Int64
@@ -80,6 +80,9 @@ type Pipe struct {
 func NewPipe(ch channel.MediaChannel, cfg Config) (*Pipe, error) {
 	if ch == nil {
 		return nil, errors.New("framing: nil media channel")
+	}
+	if err := requirePalette("NewPipe"); err != nil {
+		return nil, err
 	}
 	if cfg.CellSize <= 0 {
 		cfg.CellSize = 16
@@ -142,6 +145,9 @@ func (p *Pipe) Start(ctx context.Context) error {
 	if p.started {
 		return nil
 	}
+
+	freezePalette()
+
 	enc, err := NewEncoder(p.cfg.Width, p.cfg.Height, p.cfg.FPS, p.cfg.Bitrate)
 	if err != nil {
 		return err
@@ -154,13 +160,19 @@ func (p *Pipe) Start(ctx context.Context) error {
 	p.ctx, p.cancel = context.WithCancel(ctx)
 	p.enc = enc
 	p.dec = dec
-	p.rgbBuf = make([]byte, p.cfg.Width*p.cfg.Height*3)
+
+	p.yuvBuf = make([]byte, YUVSize(p.cfg.Width, p.cfg.Height))
+	uStart := p.cfg.Width * p.cfg.Height
+	for i := uStart; i < len(p.yuvBuf); i++ {
+		p.yuvBuf[i] = 128
+	}
+
 	p.started = true
 	p.wg.Add(2)
 	go p.recvLoop()
 	go p.sendLoop()
 	log.Printf("[framing] started: %dx%d cells, %d bit/cell (%d shades), payload=%dB/frame, max_msg=%d",
-		p.cfg.Cols, p.cfg.Rows, BitsPerCell, len(Palette),
+		p.cfg.Cols, p.cfg.Rows, BitsPerCell, len(PaletteY),
 		p.payloadBytes, p.maxMessage)
 	return nil
 }
@@ -303,7 +315,7 @@ func (p *Pipe) sendIdle() error {
 	p.idleSeq++
 	seq := int(p.idleSeq)
 	payload := make([]byte, p.payloadBytes)
-	shades := len(Palette)
+	shades := len(PaletteY)
 	bits := BitsPerCell
 	for r := 0; r < p.cfg.Rows; r++ {
 		for c := 0; c < p.cfg.Cols; c++ {
@@ -319,10 +331,10 @@ func (p *Pipe) sendIdle() error {
 }
 
 func (p *Pipe) emit(payload []byte, label string) error {
-	rgb := p.rgbBuf
-	EncodeFrame(rgb, p.cfg.Width, p.cfg.Height, p.cfg.Cols, p.cfg.Rows,
+	yuv := p.yuvBuf
+	EncodeFrameYUV(yuv, p.cfg.Width, p.cfg.Height, p.cfg.Cols, p.cfg.Rows,
 		p.cfg.CellSize, payload)
-	frame, err := p.enc.Encode(rgb)
+	frame, err := p.enc.Encode(yuv)
 	if err != nil {
 		return fmt.Errorf("framing: encode: %w", err)
 	}
@@ -386,16 +398,16 @@ func (p *Pipe) recvLoop() {
 			return
 		}
 		frameCount++
-		rgb, err := p.dec.Decode(raw)
+		yuv, err := p.dec.Decode(raw)
 		if err != nil {
 			log.Printf("[framing] recv #%d vp8=%d DECODE-FAIL: %v",
 				frameCount, len(raw), err)
 			continue
 		}
-		if rgb == nil {
+		if yuv == nil {
 			continue
 		}
-		payload := DecodeFrame(rgb, p.cfg.Width, p.cfg.Height,
+		payload := DecodeFrameYUV(yuv, p.cfg.Width,
 			p.cfg.Cols, p.cfg.Rows, p.cfg.CellSize, p.payloadBytes)
 		if payload == nil {
 			continue

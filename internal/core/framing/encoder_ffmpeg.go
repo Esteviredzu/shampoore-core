@@ -1,4 +1,4 @@
-//go:build linux
+//go:build linux && !purego
 
 package framing
 
@@ -46,10 +46,12 @@ func NewEncoder(width, height, fps int, bitrate string) (VideoEncoder, error) {
 func (e *ffmpegEncoder) start() error {
 	args := []string{
 		"-loglevel", "error",
-		"-f", "rawvideo", "-pix_fmt", "rgb24",
+		"-f", "rawvideo",
+		"-pix_fmt", "yuv420p", // современный формат
 		"-s", fmt.Sprintf("%dx%d", e.width, e.height),
 		"-r", fmt.Sprintf("%d", e.fps),
 		"-i", "-",
+		"-vf", "scale=in_range=pc:out_range=pc", // явно задаём полный диапазон на входе и выходе
 		"-c:v", "libvpx",
 		"-b:v", e.bitrate,
 		"-maxrate", e.bitrate,
@@ -87,19 +89,19 @@ func (e *ffmpegEncoder) start() error {
 	return nil
 }
 
-func (e *ffmpegEncoder) Encode(rgb []byte) ([]byte, error) {
+func (e *ffmpegEncoder) Encode(yuv []byte) ([]byte, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.dead {
 		return nil, errors.New("framing/encoder: closed")
 	}
-	want := e.width * e.height * 3
-	if len(rgb) != want {
-		return nil, fmt.Errorf("framing/encoder: bad rgb size %d, want %d", len(rgb), want)
+	want := e.width * e.height * 3 / 2
+	if len(yuv) != want {
+		return nil, fmt.Errorf("framing/encoder: bad yuv size %d, want %d", len(yuv), want)
 	}
-	if _, err := e.stdin.Write(rgb); err != nil {
+	if _, err := e.stdin.Write(yuv); err != nil {
 		e.dead = true
-		return nil, fmt.Errorf("framing/encoder: write rgb: %w", err)
+		return nil, fmt.Errorf("framing/encoder: write yuv: %w", err)
 	}
 	if !e.headerRead {
 		header := make([]byte, 32)

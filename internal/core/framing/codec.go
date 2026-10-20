@@ -1,5 +1,7 @@
 package framing
 
+func YUVSize(w, h int) int { return w * h * 3 / 2 }
+
 func getNBits(payload []byte, bitPos, bits int) byte {
 	bytePos := bitPos >> 3
 	bitOff := uint(bitPos & 7)
@@ -36,10 +38,12 @@ func setNBits(payload []byte, bitPos, bits int, val byte) {
 	}
 }
 
-func EncodeFrame(dst []byte, width, height, cols, rows, cellSize int, payload []byte) {
-	fillRect(dst, width, 0, 0, width, height, IdleBG)
+func EncodeFrameYUV(yuv []byte, width, height, cols, rows, cellSize int, payload []byte) {
+	// Заливаем Y-плоскость фоном.
+	for i := 0; i < width*height; i++ {
+		yuv[i] = IdleBGY
+	}
 	bits := BitsPerCell
-
 	for r := 0; r < rows; r++ {
 		for c := 0; c < cols; c++ {
 			idx := r*cols + c
@@ -47,28 +51,22 @@ func EncodeFrame(dst []byte, width, height, cols, rows, cellSize int, payload []
 				break
 			}
 			val := getNBits(payload, idx*bits, bits)
-			col := Palette[val]
-			fillRect(dst, width, c*cellSize, r*cellSize, cellSize, cellSize, col)
+			fillYRect(yuv, width, c*cellSize, r*cellSize, cellSize, cellSize, PaletteY[val])
 		}
 	}
 }
 
-func DecodeFrame(rgb []byte, width, height, cols, rows, cellSize, payloadBytes int) []byte {
-	if len(rgb) < width*height*3 {
+func DecodeFrameYUV(yuv []byte, width, cols, rows, cellSize, payloadBytes int) []byte {
+	if len(yuv) < width*rows*cellSize {
 		return nil
 	}
 	bits := BitsPerCell
 	payload := make([]byte, payloadBytes)
-
 	for r := 0; r < rows; r++ {
 		for c := 0; c < cols; c++ {
 			cx := c*cellSize + cellSize/2
 			cy := r*cellSize + cellSize/2
-			off := (cy*width + cx) * 3
-			if off+2 >= len(rgb) {
-				continue
-			}
-			l := lumaOf(rgb[off], rgb[off+1], rgb[off+2])
+			l := yuv[cy*width+cx]
 			idx := lumaToPalette[l]
 			cellIdx := r*cols + c
 			setNBits(payload, cellIdx*bits, bits, idx)
@@ -77,18 +75,11 @@ func DecodeFrame(rgb []byte, width, height, cols, rows, cellSize, payloadBytes i
 	return payload
 }
 
-func lumaOf(r, g, b byte) int {
-	return (int(r)*77 + int(g)*150 + int(b)*29) >> 8
-}
-
-func fillRect(dst []byte, width, x0, y0, w, h int, col [3]byte) {
+func fillYRect(dst []byte, width, x0, y0, w, h int, val byte) {
 	for y := y0; y < y0+h; y++ {
-		rowOff := y * width * 3
+		rowOff := y * width
 		for x := x0; x < x0+w; x++ {
-			off := rowOff + x*3
-			dst[off] = col[0]
-			dst[off+1] = col[1]
-			dst[off+2] = col[2]
+			dst[rowOff+x] = val
 		}
 	}
 }

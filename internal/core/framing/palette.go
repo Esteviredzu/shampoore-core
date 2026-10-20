@@ -1,81 +1,82 @@
 package framing
 
-import "fmt"
+import (
+	"fmt"
+	"sync"
+)
 
+var BitsPerCell int
 
-// 8 оттенков
-var Palette = [][3]byte{
-    {16, 16, 16},
-    {48, 48, 48},
-    {80, 80, 80},
-    {112, 112, 112},
-    {144, 144, 144},
-    {176, 176, 176},
-    {208, 208, 208},
-    {240, 240, 240},
-}
+var PaletteY []byte
 
-
-// var Palette = [][3]byte{
-// 	{8, 8, 8},
-// 	{24, 24, 24},
-// 	{40, 40, 40},
-// 	{56, 56, 56},
-// 	{72, 72, 72},
-// 	{88, 88, 88},
-// 	{104, 104, 104},
-// 	{120, 120, 120},
-// 	{136, 136, 136},
-// 	{152, 152, 152},
-// 	{168, 168, 168},
-// 	{184, 184, 184},
-// 	{200, 200, 200},
-// 	{216, 216, 216},
-// 	{232, 232, 232},
-// 	{248, 248, 248},
-// }
-
-// 32 оттенка
-//
-// var Palette = [][3]byte{
-//     {4, 4, 4}, {12, 12, 12}, {20, 20, 20}, {28, 28, 28},
-//     {36, 36, 36}, {44, 44, 44}, {52, 52, 52}, {60, 60, 60},
-//     {68, 68, 68}, {76, 76, 76}, {84, 84, 84}, {92, 92, 92},
-//     {100, 100, 100}, {108, 108, 108}, {116, 116, 116}, {124, 124, 124},
-//     {132, 132, 132}, {140, 140, 140}, {148, 148, 148}, {156, 156, 156},
-//     {164, 164, 164}, {172, 172, 172}, {180, 180, 180}, {188, 188, 188},
-//     {196, 196, 196}, {204, 204, 204}, {212, 212, 212}, {220, 220, 220},
-//     {228, 228, 228}, {236, 236, 236}, {244, 244, 244}, {252, 252, 252},
-// }
-
-var BitsPerCell = mustPow2(len(Palette))
-
-var IdleBG = Palette[0]
+var IdleBGY byte
 
 var lumaToPalette [256]byte
 
-func mustPow2(n int) int {
-	if n < 2 || n&(n-1) != 0 {
-		panic(fmt.Sprintf(
-			"framing: len(Palette) must be a power of 2, got %d", n))
+var (
+	paletteMu     sync.Mutex
+	paletteReady  bool
+	paletteFrozen bool
+)
+
+func InitPalette(bits int) error {
+	if bits < 1 || bits > 8 {
+		return fmt.Errorf(
+			"framing: bits per cell must be 1..8, got %d", bits)
 	}
-	bits := 0
-	for x := n; x > 1; x >>= 1 {
-		bits++
+	paletteMu.Lock()
+	defer paletteMu.Unlock()
+	if paletteFrozen {
+		if BitsPerCell != bits {
+			return fmt.Errorf(
+				"framing: palette frozen at bits=%d, cannot change to %d",
+				BitsPerCell, bits)
+		}
+		return nil
 	}
-	return bits
+	if paletteReady && BitsPerCell != bits {
+		return fmt.Errorf(
+			"framing: palette already initialized with bits=%d, "+
+				"cannot change to %d", BitsPerCell, bits)
+	}
+	rebuildPalette(bits)
+	paletteReady = true
+	return nil
 }
 
-func init() {
-	lumas := make([]int, len(Palette))
-	for i, c := range Palette {
-		lumas[i] = lumaOf(c[0], c[1], c[2])
+func freezePalette() {
+	paletteMu.Lock()
+	paletteFrozen = true
+	paletteMu.Unlock()
+}
+
+func requirePalette(where string) error {
+	paletteMu.Lock()
+	ready := paletteReady
+	paletteMu.Unlock()
+	if !ready {
+		return fmt.Errorf(
+			"framing: %s: palette not initialized "+
+				"(call framing.InitPalette first)", where)
 	}
+	return nil
+}
+
+func rebuildPalette(bits int) {
+	BitsPerCell = bits
+	n := 1 << bits
+	step := 256 / n
+	PaletteY = make([]byte, n)
+	for i := 0; i < n; i++ {
+		PaletteY[i] = byte(step/2 + i*step)
+	}
+	IdleBGY = PaletteY[0]
+
 	for l := 0; l < 256; l++ {
 		best := 0
 		bestDist := 1 << 30
-		for i, pl := range lumas {
-			d := l - pl
+		for i, pl := range PaletteY {
+			d := l - int(pl)
 			if d < 0 {
 				d = -d
 			}

@@ -1,4 +1,4 @@
-//go:build linux
+//go:build linux && !purego
 
 package framing
 
@@ -67,7 +67,10 @@ func (d *ffmpegDecoder) start() error {
 	cmd := exec.Command("ffmpeg",
 		"-loglevel", "error",
 		"-f", "ivf", "-i", "-",
-		"-f", "rawvideo", "-pix_fmt", "rgb24", "-",
+		"-vf", "scale=in_range=pc:out_range=pc", // гарантируем полный диапазон на выходе
+		"-f", "rawvideo",
+		"-pix_fmt", "yuv420p", // современный формат
+		"-",
 	)
 	cmd.Stderr = os.Stderr
 	stdin, err := cmd.StdinPipe()
@@ -110,14 +113,14 @@ func (d *ffmpegDecoder) writeIVFHeader() error {
 }
 
 func (d *ffmpegDecoder) readLoop() {
-	frameSize := d.width * d.height * 3
+	frameSize := d.width * d.height * 3 / 2
 	defer func() {
 		close(d.frameCh)
 		close(d.errCh)
 	}()
 	for {
-		rgb := make([]byte, frameSize)
-		if _, err := io.ReadFull(d.stdout, rgb); err != nil {
+		yuv := make([]byte, frameSize)
+		if _, err := io.ReadFull(d.stdout, yuv); err != nil {
 			log.Printf("[framing/decoder] readLoop exit after %d frames: %v",
 				d.statsOut, err)
 			select {
@@ -131,12 +134,12 @@ func (d *ffmpegDecoder) readLoop() {
 		n := d.statsOut
 		d.mu.Unlock()
 		if n == 1 {
-			log.Printf("[framing/decoder] FIRST RGB frame produced")
+			log.Printf("[framing/decoder] FIRST YUV frame produced")
 		} else if n%50 == 0 {
 			log.Printf("[framing/decoder] decoded %d frames, ffmpeg keeps up", n)
 		}
 		select {
-		case d.frameCh <- rgb:
+		case d.frameCh <- yuv:
 		case <-time.After(decodeTimeout):
 			log.Printf("[framing/decoder] WARNING: frame dropped, "+
 				"consumer stalled > %v", decodeTimeout)
@@ -149,34 +152,6 @@ func isVP8Keyframe(data []byte) bool {
 		return false
 	}
 	return (data[0] & 0x01) == 0
-}
-
-func (d *ffmpegDecoder) dumpFirstFrame(vp8Frame []byte) {
-	h := make([]byte, 32)
-	copy(h[0:4], "DKIF")
-	binary.LittleEndian.PutUint16(h[6:8], 32)
-	copy(h[8:12], "VP80")
-	binary.LittleEndian.PutUint16(h[12:14], uint16(d.width))
-	binary.LittleEndian.PutUint16(h[14:16], uint16(d.height))
-	binary.LittleEndian.PutUint32(h[16:20], uint32(d.fps))
-	binary.LittleEndian.PutUint32(h[20:24], 1)
-	binary.LittleEndian.PutUint32(h[24:28], 1)
-
-	fh := make([]byte, 12)
-	binary.LittleEndian.PutUint32(fh[0:4], uint32(len(vp8Frame)))
-
-	full := make([]byte, 0, len(h)+len(fh)+len(vp8Frame))
-	full = append(full, h...)
-	full = append(full, fh...)
-	full = append(full, vp8Frame...)
-
-	path := "/tmp/decoder_first_frame.ivf"
-	if err := os.WriteFile(path, full, 0644); err != nil {
-		log.Printf("[framing/decoder] dump first frame: %v", err)
-		return
-	}
-	log.Printf("[framing/decoder] first VP8 frame (%d B) dumped to %s — проверить: ffmpeg -f ivf -i %s -f null -",
-		len(vp8Frame), path, path)
 }
 
 func (d *ffmpegDecoder) Decode(vp8Frame []byte) ([]byte, error) {
@@ -200,13 +175,6 @@ func (d *ffmpegDecoder) Decode(vp8Frame []byte) ([]byte, error) {
 			inN, len(vp8Frame), d.statsOut)
 	}
 
-	if !d.dumped {
-		d.dumped = true
-		d.mu.Unlock()
-		d.dumpFirstFrame(vp8Frame)
-		d.mu.Lock()
-	}
-
 	fh := make([]byte, 12)
 	binary.LittleEndian.PutUint32(fh[0:4], uint32(len(vp8Frame)))
 	binary.LittleEndian.PutUint64(fh[4:12], d.frameIdx)
@@ -227,11 +195,11 @@ func (d *ffmpegDecoder) Decode(vp8Frame []byte) ([]byte, error) {
 	d.mu.Unlock()
 
 	select {
-	case rgb, ok := <-d.frameCh:
+	case yuv, ok := <-d.frameCh:
 		if !ok {
 			return nil, io.EOF
 		}
-		return rgb, nil
+		return yuv, nil
 	case err, ok := <-d.errCh:
 		if !ok || err == nil {
 			return nil, io.EOF
