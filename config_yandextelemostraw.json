@@ -1,0 +1,10 @@
+{
+  "name": "TelemostRawClient",
+  "encryption_password": "Пароль",
+  "mode": "socks5",
+  "transport_kind": "yandex_telemost_raw",
+  "yandex_telemost_raw": {
+    "conference_link": "https://telemost.yandex.ru/j/41514947350946",
+    "display_name": "Гость"
+  }
+}

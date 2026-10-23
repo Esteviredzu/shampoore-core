@@ -93,14 +93,22 @@ func (s *LocalServer) handle(ctx context.Context, conn net.Conn) {
 		return
 	}
 
-	if s.ipv4Only && !isIP(host) {
-		ip, err := resolveIPv4(host)
-		if err != nil {
-			s.logger.Warn("socks5: resolve ", host, ": ", err)
-			s.sendReply(conn, repHostUnreachable)
+	if s.ipv4Only {
+		ip := net.ParseIP(host)
+		switch {
+		case ip == nil:
+			resolved, err := resolveIPv4(host)
+			if err != nil {
+				s.logger.Warn("socks5: resolve ", host, ": ", err)
+				s.sendReply(conn, repHostUnreachable)
+				return
+			}
+			host = resolved
+		case ip.To4() == nil:
+			s.logger.Warn("socks5: ipv6 destination rejected: ", host)
+			s.sendReply(conn, repAddressNotSupported)
 			return
 		}
-		host = ip
 	}
 
 	stream, err := s.mux.OpenStream(ctx, map[string]any{
@@ -117,6 +125,19 @@ func (s *LocalServer) handle(ctx context.Context, conn net.Conn) {
 	if err := s.sendReply(conn, repSuccess); err != nil {
 		return
 	}
+
+	// Контекст-разблокировка: при отмене ctx закрываем conn и stream,
+	// чтобы io.Copy не висел.
+	stopWatch := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			conn.Close()
+			stream.Close()
+		case <-stopWatch:
+		}
+	}()
+	defer close(stopWatch)
 
 	done := make(chan struct{}, 2)
 	go func() { io.Copy(stream, conn); done <- struct{}{} }()

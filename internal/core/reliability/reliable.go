@@ -1,4 +1,4 @@
-package transport
+package reliability
 
 import (
 	"context"
@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/Esteviredzu/shampoore-core/internal/logging"
+	"github.com/Esteviredzu/shampoore-core/internal/transport"
 )
 
 const (
@@ -52,7 +53,7 @@ type resetMarker struct {
 }
 
 type ReliableSession struct {
-	pipe   Pipe
+	pipe   transport.Pipe
 	codec  *ReliableCodec
 	logger logging.ContextLogger
 	cfg    Config
@@ -67,6 +68,12 @@ type ReliableSession struct {
 	sendCond         *sync.Cond
 	pendingPackets   map[int]*pendingPacket
 	nextSendSequence int
+
+	// wakeRetry is signalled (non-blocking) by Send so retryLoop
+	// transmits new packets immediately instead of waiting up to
+	// retryScanInterval (100 ms). Buffered size 1 — multiple Sends
+	// coalesce into a single scan.
+	wakeRetry chan struct{}
 
 	recvMu              sync.Mutex
 	nextReceiveSequence int
@@ -90,7 +97,7 @@ type ReliableSession struct {
 	ackWg   sync.WaitGroup
 }
 
-func NewReliableSession(pipe Pipe, log logging.ContextLogger, cfg Config) (*ReliableSession, error) {
+func NewReliableSession(pipe transport.Pipe, log logging.ContextLogger, cfg Config) (*ReliableSession, error) {
 	if cfg.Window <= 0 {
 		cfg.Window = defaultWindow
 	}
@@ -125,6 +132,7 @@ func NewReliableSession(pipe Pipe, log logging.ContextLogger, cfg Config) (*Reli
 		incomingTotals:           make(map[int]int),
 		completedPackets:         make(map[int][]byte),
 		receiveQueue:             make(chan any, 512),
+		wakeRetry:                make(chan struct{}, 1),
 	}
 	s.sendCond = sync.NewCond(&s.sendMu)
 	s.ackCond = sync.NewCond(&s.recvMu)
@@ -231,6 +239,13 @@ func (s *ReliableSession) Send(ctx context.Context, data []byte) error {
 		retryDelay: initialRetryDelay,
 	}
 	s.sendMu.Unlock()
+
+	// Kick retryLoop so the new packet is transmitted right away
+	// instead of waiting for the next 100 ms tick.
+	select {
+	case s.wakeRetry <- struct{}{}:
+	default:
+	}
 	return nil
 }
 
@@ -244,7 +259,7 @@ func (s *ReliableSession) Receive(ctx context.Context) ([]byte, error) {
 		}
 		switch v := item.(type) {
 		case *resetMarker:
-			return nil, fmt.Errorf("%w: %s", ErrTransportReset, v.reason)
+			return nil, fmt.Errorf("%w: %s", transport.ErrTransportReset, v.reason)
 		case receivedPacket:
 			if v.sequence != s.nextACKSequence {
 				return nil, fmt.Errorf(
@@ -320,6 +335,8 @@ func (s *ReliableSession) retryLoop() {
 		select {
 		case <-s.ctx.Done():
 			return
+		case <-s.wakeRetry:
+			// Send requested immediate scan; fall through.
 		case <-ticker.C:
 		}
 
@@ -410,7 +427,7 @@ func (s *ReliableSession) receiveLoop() {
 
 		raw, err := s.pipe.ReceiveMessage(s.ctx)
 		if err != nil {
-			if errors.Is(err, ErrPipeReset) {
+			if errors.Is(err, transport.ErrPipeReset) {
 				s.logger.Warn("reliable: pipe reset")
 				s.handlePipeReset()
 				continue
@@ -618,6 +635,11 @@ func (s *ReliableSession) handlePipeReset() {
 		p.lastSentAt = time.Time{}
 	}
 	s.sendMu.Unlock()
+	// Wake retryLoop so all pending packets are immediately resent.
+	select {
+	case s.wakeRetry <- struct{}{}:
+	default:
+	}
 }
 
 func (s *ReliableSession) signalTransportReset(reason string) {

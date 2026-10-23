@@ -1,12 +1,15 @@
 package app
 
+const IPv4Only = true
+
 func defaultSettings() *Settings {
 	return &Settings{
 		Mode: ModeSOCKS5,
 
+		IPv4Only: IPv4Only,
+
 		SOCKS5: SOCKS5Config{
-			Listen:   "127.0.0.1:1080",
-			IPv4Only: true,
+			Listen: "127.0.0.1:1080",
 		},
 
 		TUN: TUNConfig{
@@ -17,14 +20,7 @@ func defaultSettings() *Settings {
 			DNSServers: []string{"1.1.1.1:53", "8.8.8.8:53"},
 		},
 
-		Advanced: Advanced{
-			MuxFlushMs:        20,
-			MuxFlushThreshold: 12000,
-			ReliableWindow:    64,
-			ReliableChunk:     0,
-			PaddingEnabled:    true,
-			PaddingTarget:     14000,
-		},
+		Advanced: NewValues(),
 
 		transportKind: "yandex",
 	}

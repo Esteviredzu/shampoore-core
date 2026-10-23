@@ -1,4 +1,4 @@
-package transport
+package reliability
 
 import (
 	"encoding/binary"
@@ -51,7 +51,7 @@ func (c *ReliableCodec) Encode(sessionID string, sequence int, data []byte) ([][
 	if err != nil {
 		return nil, fmt.Errorf("invalid session_id: %w", err)
 	}
-	if sequence < 0 || sequence > 0xFFFFFFFF {
+	if sequence < 0 || int64(sequence) > 0xFFFFFFFF {
 		return nil, fmt.Errorf("sequence out of range: %d", sequence)
 	}
 
@@ -100,7 +100,7 @@ func (c *ReliableCodec) EncodeACK(targetSessionID, senderSessionID string, seque
 	if err != nil {
 		return nil, fmt.Errorf("invalid sender session_id: %w", err)
 	}
-	if sequence < 0 || sequence > 0xFFFFFFFF {
+	if sequence < 0 || int64(sequence) > 0xFFFFFFFF {
 		return nil, fmt.Errorf("sequence out of range: %d", sequence)
 	}
 
@@ -145,7 +145,7 @@ func (c *ReliableCodec) Decode(buf []byte) *DecodedPacket {
 
 	payloadLen := int(binary.BigEndian.Uint32(buf[63:67]))
 
-	if payloadLen != len(buf)-headerSize {
+	if payloadLen < 0 || payloadLen > len(buf)-headerSize {
 		return nil
 	}
 
@@ -176,7 +176,7 @@ func (c *ReliableCodec) Decode(buf []byte) *DecodedPacket {
 	}
 
 	payload := make([]byte, payloadLen)
-	copy(payload, buf[67:])
+	copy(payload, buf[headerSize:headerSize+payloadLen])
 
 	return &DecodedPacket{
 		Kind:           "data",

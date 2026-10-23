@@ -16,6 +16,8 @@ import (
 	"github.com/Esteviredzu/shampoore-core/internal/socks5"
 
 	_ "github.com/Esteviredzu/shampoore-core/internal/transport/yandex"
+	_ "github.com/Esteviredzu/shampoore-core/internal/transport/yandex_telemost_raw"
+	_ "github.com/Esteviredzu/shampoore-core/internal/transport/yandex_telemost_squares"
 )
 
 func main() {
@@ -54,9 +56,10 @@ func main() {
 		log.Fatalf("build runtime: %v", err)
 	}
 
-	muxCfg := tunnel.DefaultConfig()
-	muxCfg.FlushThreshold = s.Advanced.MuxFlushThreshold
-	muxCfg.FlushInterval = time.Duration(s.Advanced.MuxFlushMs) * time.Millisecond
+	muxCfg := tunnel.Config{
+		FlushThreshold: rt.MuxConfig.FlushThreshold,
+		FlushInterval:  time.Duration(rt.MuxConfig.FlushMs) * time.Millisecond,
+	}
 	mux := tunnel.New(rt.Transport, lg, muxCfg)
 
 	if err := mux.Start(ctx); err != nil {
@@ -66,7 +69,7 @@ func main() {
 		log.Fatalf("runtime start: %v", err)
 	}
 
-	handler := socks5.NewRemoteHandler(ctx, mux, lg, 8000)
+	handler := socks5.NewRemoteHandler(ctx, mux, lg, 8000, app.IPv4Only)
 	go func() {
 		if err := handler.Run(); err != nil {
 			log.Printf("handler stopped: %v", err)
@@ -75,8 +78,14 @@ func main() {
 
 	println("server: ready")
 	<-ctx.Done()
+	println("server: stopping")
+
+	stopCtx, cancelStop := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelStop()
 
 	handler.Stop()
-	_ = rt.Stop(context.Background())
-	_ = mux.Stop(context.Background())
+	_ = rt.Stop(stopCtx)
+	_ = mux.Stop(stopCtx)
+
+	println("server: stopped")
 }

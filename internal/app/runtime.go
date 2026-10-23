@@ -13,18 +13,23 @@ type SideService interface {
 
 type Runtime struct {
 	Transport    transport.Transport
+	Provider     Provider
 	BypassHosts  []string
+	ConnectedIPs func() []string
+	MuxConfig    MuxConfig
 	sideServices []SideService
 	started      bool
 }
 
 func NewRuntime(
 	t transport.Transport,
+	provider Provider,
 	bypass []string,
 	side []SideService,
 ) *Runtime {
 	return &Runtime{
 		Transport:    t,
+		Provider:     provider,
 		BypassHosts:  bypass,
 		sideServices: side,
 	}
@@ -53,6 +58,9 @@ func (r *Runtime) Stop(ctx context.Context) error {
 	r.started = false
 	for i := len(r.sideServices) - 1; i >= 0; i-- {
 		_ = r.sideServices[i].Stop(ctx)
+	}
+	if r.Provider != nil {
+		_ = r.Provider.Stop(ctx)
 	}
 	return nil
 }

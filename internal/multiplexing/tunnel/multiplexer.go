@@ -124,6 +124,13 @@ func (m *TunnelMultiplexer) OpenStream(
 		m.mu.Unlock()
 		return nil, fmt.Errorf("tunnel: multiplexer is closed")
 	}
+	// Multiplexer not started yet: m.ctx will be nil and any Write/Close
+	// on the returned stream would panic when it dereferences m.ctx.
+	// Fail fast instead of handing out a timebomb.
+	if m.ctx == nil {
+		m.mu.Unlock()
+		return nil, fmt.Errorf("tunnel: multiplexer is not started")
+	}
 	id := uuid.NewString()
 	stream := newTunnelStream(m, id, metadata)
 	m.streams[id] = stream
@@ -195,6 +202,14 @@ func (m *TunnelMultiplexer) closeStream(id string) error {
 }
 
 func (m *TunnelMultiplexer) enqueueFrame(ctx context.Context, f *TunnelFrame) error {
+	// Guard against nil context: writeData/closeStream pass m.ctx,
+	// which is nil before Start. Caller ctx (from OpenStream) could
+	// also be nil in exotic cases. Passing nil down to transport.Send
+	// would panic on <-ctx.Done().
+	if ctx == nil {
+		return fmt.Errorf("tunnel: multiplexer is not started")
+	}
+
 	encoded, err := EncodeFrame(f)
 	if err != nil {
 		return err
@@ -305,22 +320,29 @@ func (m *TunnelMultiplexer) handleFrame(f *TunnelFrame) {
 	switch f.Type {
 	case FrameOpen:
 		m.mu.Lock()
+		// If we're already shutting down, don't insert the stream at
+		// all: Stop() has already snapshotted & cleared m.streams, so
+		// inserting now would leak the entry.
+		if m.closed {
+			m.mu.Unlock()
+			return
+		}
 		if _, exists := m.streams[f.StreamID]; exists {
 			m.mu.Unlock()
 			return
 		}
 		stream := newTunnelStream(m, f.StreamID, f.Metadata)
 		m.streams[f.StreamID] = stream
-		closed := m.closed
 		m.mu.Unlock()
 
-		if closed {
-			stream.deliverEOF(io.EOF)
-			return
-		}
 		select {
 		case m.incoming <- stream:
 		case <-m.ctx.Done():
+			// Same leak-avoidance as above, but for the shutdown race
+			// that happens between insertion and delivery.
+			m.mu.Lock()
+			delete(m.streams, f.StreamID)
+			m.mu.Unlock()
 			stream.deliverEOF(io.EOF)
 		}
 

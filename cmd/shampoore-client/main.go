@@ -13,10 +13,11 @@ import (
 	"github.com/Esteviredzu/shampoore-core/internal/logging"
 	"github.com/Esteviredzu/shampoore-core/internal/multiplexing/tunnel"
 	"github.com/Esteviredzu/shampoore-core/internal/runtime"
-	"github.com/Esteviredzu/shampoore-core/internal/runtime/muxproxy"
 	"github.com/Esteviredzu/shampoore-core/internal/socks5"
 
 	_ "github.com/Esteviredzu/shampoore-core/internal/transport/yandex"
+	_ "github.com/Esteviredzu/shampoore-core/internal/transport/yandex_telemost_raw"
+	_ "github.com/Esteviredzu/shampoore-core/internal/transport/yandex_telemost_squares"
 )
 
 func main() {
@@ -41,9 +42,10 @@ func main() {
 		log.Fatalf("build runtime: %v", err)
 	}
 
-	muxCfg := tunnel.DefaultConfig()
-	muxCfg.FlushThreshold = s.Advanced.MuxFlushThreshold
-	muxCfg.FlushInterval = time.Duration(s.Advanced.MuxFlushMs) * time.Millisecond
+	muxCfg := tunnel.Config{
+		FlushThreshold: rt.MuxConfig.FlushThreshold,
+		FlushInterval:  time.Duration(rt.MuxConfig.FlushMs) * time.Millisecond,
+	}
 	mux := tunnel.New(rt.Transport, lg, muxCfg)
 
 	if err := mux.Start(ctx); err != nil {
@@ -54,7 +56,7 @@ func main() {
 	}
 
 	if s.SOCKS5Enabled() {
-		srv := socks5.NewLocalServer(s.SOCKS5.Listen, mux, lg, s.SOCKS5.IPv4Only)
+		srv := socks5.NewLocalServer(s.SOCKS5.Listen, mux, lg, app.IPv4Only)
 		go func() {
 			if err := srv.ListenAndServe(ctx); err != nil {
 				log.Printf("socks5 stopped: %v", err)
@@ -64,22 +66,8 @@ func main() {
 	}
 
 	if s.TUNEnabled() {
-		bypass := append([]string{}, s.TUN.BypassHosts...)
-		bypass = append(bypass, rt.BypassHosts...)
-
-		tunCfg := runtime.TUNConfig{
-			Name:        s.TUN.Name,
-			MTU:         s.TUN.MTU,
-			Inet4:       s.TUN.Inet4,
-			AutoRoute:   s.TUN.AutoRoute,
-			BypassHosts: dedup(bypass),
-			DNSServers:  s.TUN.DNSServers,
-		}
-
-		muxproxy.SetMux(mux)
-
 		go func() {
-			if err := runtime.StartTUN(ctx, tunCfg, mux); err != nil {
+			if err := runtime.StartClientTUN(ctx, s, rt, mux); err != nil {
 				log.Printf("tun stopped: %v", err)
 			}
 		}()
@@ -90,19 +78,11 @@ func main() {
 	<-ctx.Done()
 	println("client: stopping")
 
-	_ = rt.Stop(context.Background())
-	_ = mux.Stop(context.Background())
-}
+	stopCtx, cancelStop := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelStop()
 
-func dedup(in []string) []string {
-	seen := make(map[string]bool, len(in))
-	out := make([]string, 0, len(in))
-	for _, s := range in {
-		if s == "" || seen[s] {
-			continue
-		}
-		seen[s] = true
-		out = append(out, s)
-	}
-	return out
+	_ = rt.Stop(stopCtx)
+	_ = mux.Stop(stopCtx)
+
+	println("client: stopped")
 }

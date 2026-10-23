@@ -6,21 +6,47 @@ import (
 	"time"
 
 	"github.com/Esteviredzu/shampoore-core/internal/app"
+	"github.com/Esteviredzu/shampoore-core/internal/core/reliability"
+	"github.com/Esteviredzu/shampoore-core/internal/core/security"
 	"github.com/Esteviredzu/shampoore-core/internal/logging"
 	"github.com/Esteviredzu/shampoore-core/internal/transport"
-	"github.com/Esteviredzu/shampoore-core/internal/transport/security"
 )
 
 func init() {
-	app.RegisterTransport("yandex", buildRuntime)
+	defaults := app.Values{
+		"mux_flush_ms":        20,
+		"mux_flush_threshold": 12000,
+
+		"reliable_window": 64,
+		"reliable_chunk":  0,
+
+		"padding_enabled": true,
+		"padding_target":  14000,
+
+		"jitter_min_ms": 0,
+		"jitter_max_ms": 0,
+	}
+
+	err := app.RegisterDescriptor(app.Descriptor{
+		Kind:        "yandex",
+		DisplayName: "Yandex Board",
+		Defaults:    defaults,
+		DecodeURL:   decodeURL,
+		EncodeURL:   encodeURL,
+		Build:       buildTransport,
+	})
+	if err != nil {
+		panic(err)
+	}
 }
 
-func buildRuntime(
+func buildTransport(
 	ctx context.Context,
 	s *app.Settings,
 	role string,
 	logger logging.ContextLogger,
-) (*app.Runtime, error) {
+	eff app.Values,
+) (*app.BuildResult, error) {
 	cfg := DefaultConfig()
 	if data := s.TransportData(); len(data) > 0 {
 		if err := json.Unmarshal(data, &cfg); err != nil {
@@ -48,8 +74,7 @@ func buildRuntime(
 		return nil, err
 	}
 
-	heartbeatCtx, _ := context.WithCancel(context.Background())
-	client.StartPeriodicHeartbeat(heartbeatCtx)
+	client.StartPeriodicHeartbeat(ctx)
 
 	pipeCfg := DefaultPipeConfig()
 	pipeCfg.QueueSize = cfg.PipeQueue
@@ -62,11 +87,8 @@ func buildRuntime(
 
 	var pipe transport.Pipe = NewYandexPipe(client, logger, pipeCfg)
 
-	if s.Advanced.PaddingEnabled {
-		target := s.Advanced.PaddingTarget
-		if target <= 0 {
-			target = 14000
-		}
+	if eff.Bool("padding_enabled", true) {
+		target := eff.Int("padding_target", 14000)
 		pp, err := security.NewPaddingPipe(pipe, target)
 		if err != nil {
 			return nil, err
@@ -84,16 +106,16 @@ func buildRuntime(
 		logger.Info("yandex: encryption enabled")
 	}
 
-	if s.Advanced.JitterMaxMs > 0 {
-		minD := time.Duration(s.Advanced.JitterMinMs) * time.Millisecond
-		maxD := time.Duration(s.Advanced.JitterMaxMs) * time.Millisecond
+	if eff.Int("jitter_max_ms", 0) > 0 {
+		minD := eff.Duration("jitter_min_ms", 0)
+		maxD := eff.Duration("jitter_max_ms", 0)
 		pipe = security.NewJitterPipe(pipe, minD, maxD)
 		logger.Info("yandex: jitter enabled")
 	}
 
-	session, err := transport.NewReliableSession(pipe, logger, transport.Config{
-		Window:    s.Advanced.ReliableWindow,
-		ChunkSize: s.Advanced.ReliableChunk,
+	session, err := reliability.NewReliableSession(pipe, logger, reliability.Config{
+		Window:    eff.Int("reliable_window", 64),
+		ChunkSize: eff.Int("reliable_chunk", 0),
 	})
 	if err != nil {
 		return nil, err
@@ -115,5 +137,9 @@ func buildRuntime(
 		sides = append(sides, NewCleanupWorker(creds, logger, workerCfg))
 	}
 
-	return app.NewRuntime(session, bypass, sides), nil
+	return &app.BuildResult{
+		Transport:   session,
+		BypassHosts: bypass,
+		Side:        sides,
+	}, nil
 }
