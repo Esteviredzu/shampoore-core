@@ -548,8 +548,6 @@ func (s *signaling) startPublish() error {
 		return err
 	}
 
-	offer.SDP = mungeSDPAddVideoContent(offer.SDP)
-
 	videoMids, audioMids := parseMids(offer.SDP)
 
 	var tracks []map[string]any

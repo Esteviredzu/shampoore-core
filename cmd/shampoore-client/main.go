@@ -13,11 +13,11 @@ import (
 	"github.com/Esteviredzu/shampoore-core/internal/logging"
 	"github.com/Esteviredzu/shampoore-core/internal/multiplexing/tunnel"
 	"github.com/Esteviredzu/shampoore-core/internal/runtime"
-	"github.com/Esteviredzu/shampoore-core/internal/runtime/muxproxy"
 	"github.com/Esteviredzu/shampoore-core/internal/socks5"
 
 	_ "github.com/Esteviredzu/shampoore-core/internal/transport/yandex"
-	_ "github.com/Esteviredzu/shampoore-core/internal/transport/telemost"
+	_ "github.com/Esteviredzu/shampoore-core/internal/transport/yandex_telemost_raw"
+	_ "github.com/Esteviredzu/shampoore-core/internal/transport/yandex_telemost_squares"
 )
 
 func main() {
@@ -66,22 +66,8 @@ func main() {
 	}
 
 	if s.TUNEnabled() {
-		bypass := append([]string{}, s.TUN.BypassHosts...)
-		bypass = append(bypass, rt.BypassHosts...)
-
-		tunCfg := runtime.TUNConfig{
-			Name:        s.TUN.Name,
-			MTU:         s.TUN.MTU,
-			Inet4:       s.TUN.Inet4,
-			AutoRoute:   s.TUN.AutoRoute,
-			BypassHosts: dedup(bypass),
-			DNSServers:  s.TUN.DNSServers,
-		}
-
-		muxproxy.SetMux(mux, app.IPv4Only)
-
 		go func() {
-			if err := runtime.StartTUN(ctx, tunCfg, mux); err != nil {
+			if err := runtime.StartClientTUN(ctx, s, rt, mux); err != nil {
 				log.Printf("tun stopped: %v", err)
 			}
 		}()
@@ -99,17 +85,4 @@ func main() {
 	_ = mux.Stop(stopCtx)
 
 	println("client: stopped")
-}
-
-func dedup(in []string) []string {
-	seen := make(map[string]bool, len(in))
-	out := make([]string, 0, len(in))
-	for _, s := range in {
-		if s == "" || seen[s] {
-			continue
-		}
-		seen[s] = true
-		out = append(out, s)
-	}
-	return out
 }

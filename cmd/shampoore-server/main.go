@@ -16,7 +16,8 @@ import (
 	"github.com/Esteviredzu/shampoore-core/internal/socks5"
 
 	_ "github.com/Esteviredzu/shampoore-core/internal/transport/yandex"
-	_ "github.com/Esteviredzu/shampoore-core/internal/transport/telemost"
+	_ "github.com/Esteviredzu/shampoore-core/internal/transport/yandex_telemost_raw"
+	_ "github.com/Esteviredzu/shampoore-core/internal/transport/yandex_telemost_squares"
 )
 
 func main() {

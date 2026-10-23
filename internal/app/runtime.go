@@ -15,6 +15,7 @@ type Runtime struct {
 	Transport    transport.Transport
 	Provider     Provider
 	BypassHosts  []string
+	ConnectedIPs func() []string
 	MuxConfig    MuxConfig
 	sideServices []SideService
 	started      bool

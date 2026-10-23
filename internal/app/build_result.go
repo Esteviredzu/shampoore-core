@@ -9,4 +9,6 @@ type BuildResult struct {
 	Provider    Provider
 	BypassHosts []string
 	Side        []SideService
+
+	ConnectedIPs func() []string
 }

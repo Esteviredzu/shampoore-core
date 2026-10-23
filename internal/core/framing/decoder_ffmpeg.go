@@ -1,4 +1,4 @@
-//go:build linux && !purego
+//go:build linux && !android
 
 package framing
 

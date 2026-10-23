@@ -51,7 +51,7 @@ func (c *ReliableCodec) Encode(sessionID string, sequence int, data []byte) ([][
 	if err != nil {
 		return nil, fmt.Errorf("invalid session_id: %w", err)
 	}
-	if sequence < 0 || sequence > 0xFFFFFFFF {
+	if sequence < 0 || int64(sequence) > 0xFFFFFFFF {
 		return nil, fmt.Errorf("sequence out of range: %d", sequence)
 	}
 
@@ -100,7 +100,7 @@ func (c *ReliableCodec) EncodeACK(targetSessionID, senderSessionID string, seque
 	if err != nil {
 		return nil, fmt.Errorf("invalid sender session_id: %w", err)
 	}
-	if sequence < 0 || sequence > 0xFFFFFFFF {
+	if sequence < 0 || int64(sequence) > 0xFFFFFFFF {
 		return nil, fmt.Errorf("sequence out of range: %d", sequence)
 	}
 

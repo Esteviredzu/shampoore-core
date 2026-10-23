@@ -26,6 +26,7 @@ func BuildRuntime(
 	}
 
 	rt := NewRuntime(res.Transport, res.Provider, res.BypassHosts, res.Side)
+	rt.ConnectedIPs = res.ConnectedIPs
 	rt.MuxConfig = MuxConfig{
 		FlushMs:        eff.Int("mux_flush_ms", 20),
 		FlushThreshold: eff.Int("mux_flush_threshold", 12000),

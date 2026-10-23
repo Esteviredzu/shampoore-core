@@ -1,4 +1,4 @@
-//go:build linux && !purego
+//go:build linux && !android
 
 package framing
 
@@ -47,12 +47,13 @@ func (e *ffmpegEncoder) start() error {
 	args := []string{
 		"-loglevel", "error",
 		"-f", "rawvideo",
-		"-pix_fmt", "yuv420p", // современный формат
+		"-pix_fmt", "yuv420p",
 		"-s", fmt.Sprintf("%dx%d", e.width, e.height),
 		"-r", fmt.Sprintf("%d", e.fps),
 		"-i", "-",
-		"-vf", "scale=in_range=pc:out_range=pc", // явно задаём полный диапазон на входе и выходе
+		"-vf", "scale=in_range=pc:out_range=pc",
 		"-c:v", "libvpx",
+		"-slices", "1",
 		"-b:v", e.bitrate,
 		"-maxrate", e.bitrate,
 		"-bufsize", "2M",

@@ -1,7 +1,10 @@
+//go:build linux && !android
+
 package runtime
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -27,15 +30,6 @@ type ifreq struct {
 	Name  [16]byte
 	Flags uint16
 	pad   [22]byte
-}
-
-type TUNConfig struct {
-	Name        string
-	MTU         int
-	Inet4       string
-	AutoRoute   bool
-	BypassHosts []string
-	DNSServers  []string
 }
 
 type originalRoute struct {
@@ -89,6 +83,29 @@ func StartTUN(ctx context.Context, cfg TUNConfig, m multiplexing.StreamMultiplex
 
 	resolver := newResolver(cfg.DNSServers)
 	bypassIPs := resolveHosts(resolver, cfg.BypassHosts)
+
+	seen := make(map[string]bool, len(bypassIPs))
+	for _, ip := range bypassIPs {
+		seen[ip] = true
+	}
+	for _, dns := range cfg.DNSServers {
+		host, _, err := net.SplitHostPort(dns)
+		if err != nil {
+			continue
+		}
+		ip := net.ParseIP(host)
+		if ip == nil || ip.To4() == nil {
+			continue
+		}
+		s := ip.To4().String()
+		if seen[s] {
+			continue
+		}
+		seen[s] = true
+		bypassIPs = append(bypassIPs, s)
+		log.Printf("tun: bypass dns %s", s)
+	}
+
 	if len(bypassIPs) == 0 {
 		return fmt.Errorf("tun: no bypass IPs resolved")
 	}
@@ -107,7 +124,6 @@ func StartTUN(ctx context.Context, cfg TUNConfig, m multiplexing.StreamMultiplex
 	}
 	defer cleanup()
 
-	// muxproxy уже настроен через muxproxy.SetMux в cmd/*/main.go
 	_ = m
 
 	key := &engine.Key{
@@ -126,6 +142,10 @@ func StartTUN(ctx context.Context, cfg TUNConfig, m multiplexing.StreamMultiplex
 	<-ctx.Done()
 	log.Println("tun: stopping")
 	return nil
+}
+
+func StartTUNFD(ctx context.Context, fd int, mtu int) error {
+	return errors.New("tun/linux: StartTUNFD is not supported; use StartTUN")
 }
 
 func setupRoutes(cfg TUNConfig, orig originalRoute, bypassIPs []string) (func(), error) {
@@ -232,6 +252,21 @@ func resolveHosts(resolver *net.Resolver, hosts []string) []string {
 	for _, h := range hosts {
 		h = strings.TrimSpace(h)
 		if h == "" {
+			continue
+		}
+
+		if ip := net.ParseIP(h); ip != nil {
+			v4 := ip.To4()
+			if v4 == nil {
+				continue
+			}
+			s := v4.String()
+			if seen[s] {
+				continue
+			}
+			seen[s] = true
+			out = append(out, s)
+			log.Printf("tun: bypass %s (direct ip)", s)
 			continue
 		}
 
