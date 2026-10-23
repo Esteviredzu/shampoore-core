@@ -4,8 +4,8 @@
 
 config_yandexboard.json
 config_yandextelemost.json
-config_yandextelemost_client.json
-config_yandextelemost_server.json
+config_yandextelemostraw.json
+
 squares-visual
 bin
 speedtest.py
