@@ -1,0 +1,9 @@
+{
+  "name": "🇵🇱 Yandex telemost raw-Polska",
+  "type": "yandex_telemost_raw",
+  "transport": {
+    "conference_id": "YOUR_NUMBERS",
+    "display_name": "Гость"
+  },
+  "encryption_password": "VERY_HARD_PASSWORD"
+}

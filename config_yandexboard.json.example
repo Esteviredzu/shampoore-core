@@ -1,8 +1,8 @@
 {
-  "name": "🇵🇱 Yandex-Polska",
-  "encryption_password": "VERY HARD PASSWORD",
-  "mode": "tun",
-  "yandex": {
+  "name": "🇵🇱 Yandexboard-Polska",
+  "type": "yandex",
+  "transport": {
     "hash": "yandexboard_hash"
-  }
+  },
+  "encryption_password": "VERY HARD PASSWORD"
 }

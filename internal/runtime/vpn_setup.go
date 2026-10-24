@@ -9,7 +9,8 @@ import (
 )
 
 func ComputeBypassHosts(s *app.Settings, rt *app.Runtime) []string {
-	bypass := append([]string{}, s.TUN.BypassHosts...)
+	eff := s.EffectiveAdvanced()
+	bypass := append([]string{}, eff.StringSlice("tun_bypass", nil)...)
 	bypass = append(bypass, rt.BypassHosts...)
 	if rt.ConnectedIPs != nil {
 		if extra := rt.ConnectedIPs(); len(extra) > 0 {
@@ -20,7 +21,6 @@ func ComputeBypassHosts(s *app.Settings, rt *app.Runtime) []string {
 	}
 	return DedupStrings(bypass)
 }
-
 
 func DedupStrings(in []string) []string {
 	seen := make(map[string]bool, len(in))

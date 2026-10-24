@@ -3,8 +3,8 @@
 *.exe
 
 config_yandexboard.json
-config_yandextelemost.json
-config_yandextelemostraw.json
+config_yandex_telemost_squares.json
+config_yandex_telemost_raw.json
 
 squares-visual
 bin

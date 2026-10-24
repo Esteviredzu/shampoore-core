@@ -2,6 +2,8 @@ package app
 
 import (
 	"encoding/json"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -50,6 +52,13 @@ func (v Values) Int(key string, def int) int {
 			return def
 		}
 		return int(i)
+	case string:
+		// Приходит из URL-декода (всё строкой).
+		i, err := strconv.Atoi(strings.TrimSpace(n))
+		if err != nil {
+			return def
+		}
+		return i
 	default:
 		return def
 	}
@@ -64,11 +73,20 @@ func (v Values) Bool(key string, def bool) bool {
 	if !ok || raw == nil {
 		return def
 	}
-	b, ok := raw.(bool)
-	if !ok {
+	switch b := raw.(type) {
+	case bool:
+		return b
+	case string:
+		switch strings.ToLower(strings.TrimSpace(b)) {
+		case "true", "1", "yes", "on":
+			return true
+		case "false", "0", "no", "off":
+			return false
+		}
+		return def
+	default:
 		return def
 	}
-	return b
 }
 
 func (v Values) String(key string, def string) string {
@@ -86,4 +104,38 @@ func (v Values) String(key string, def string) string {
 func (v Values) Duration(key string, def time.Duration) time.Duration {
 	ms := v.Int(key, int(def/time.Millisecond))
 	return time.Duration(ms) * time.Millisecond
+}
+
+func (v Values) StringSlice(key string, def []string) []string {
+	raw, ok := v[key]
+	if !ok || raw == nil {
+		return def
+	}
+	switch s := raw.(type) {
+	case []string:
+		return s
+	case []any:
+		out := make([]string, 0, len(s))
+		for _, item := range s {
+			if str, ok := item.(string); ok {
+				out = append(out, str)
+			}
+		}
+		return out
+	case string:
+		if s == "" {
+			return def
+		}
+		parts := strings.Split(s, ",")
+		out := make([]string, 0, len(parts))
+		for _, p := range parts {
+			p = strings.TrimSpace(p)
+			if p != "" {
+				out = append(out, p)
+			}
+		}
+		return out
+	default:
+		return def
+	}
 }

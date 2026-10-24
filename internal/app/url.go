@@ -3,10 +3,14 @@ package app
 import (
 	"fmt"
 	"net/url"
+	"strconv"
 	"strings"
 )
 
-const URLScheme = "shampoore"
+const (
+	URLScheme      = "shampoore"
+	advancedPrefix = "a."
+)
 
 func ParseSource(src string) (*Settings, error) {
 	if strings.HasPrefix(src, URLScheme+"://") {
@@ -24,27 +28,43 @@ func ParseURL(raw string) (*Settings, error) {
 		return nil, fmt.Errorf("app: unexpected scheme %q", u.Scheme)
 	}
 
-	kind := u.Host
+	q := u.Query()
+
+	kind := q.Get("type")
 	if kind == "" {
-		return nil, fmt.Errorf("app: shampoore url missing transport kind")
+		kind = u.Host
+	}
+	if kind == "" {
+		return nil, fmt.Errorf("app: shampoore url missing type")
 	}
 
 	d, ok := DescriptorFor(kind)
 	if !ok {
-		return nil, fmt.Errorf("app: unknown transport kind %q", kind)
+		return nil, fmt.Errorf("app: unknown transport type %q", kind)
 	}
 	if d.DecodeURL == nil {
 		return nil, fmt.Errorf("app: transport %q does not support URL parsing", kind)
 	}
 
-	q := u.Query()
 	s := defaultSettings()
-
 	if v := q.Get("pw"); v != "" {
 		s.EncryptionPassword = v
 	}
 	if u.Fragment != "" {
 		s.Name = u.Fragment
+	}
+
+	// Юзерские overrides: a.<key>=<value>. Всё декодируется как string —
+	// Values.Int/Bool/StringSlice сами сожмут обратно.
+	for key, vals := range q {
+		if !strings.HasPrefix(key, advancedPrefix) || len(vals) == 0 {
+			continue
+		}
+		realKey := strings.TrimPrefix(key, advancedPrefix)
+		if realKey == "" {
+			continue
+		}
+		s.Advanced[realKey] = vals[0]
 	}
 
 	data, err := d.DecodeURL(q)
@@ -53,42 +73,68 @@ func ParseURL(raw string) (*Settings, error) {
 	}
 	s.SetTransportData(kind, data)
 
-	if err := s.validate(); err != nil {
-		return nil, err
-	}
 	return s, nil
 }
 
 func EncodeURL(s *Settings) (string, error) {
-	kind := s.TransportKind()
+	kind := s.Type
 	if kind == "" {
-		return "", fmt.Errorf("app: transport kind not set")
+		return "", fmt.Errorf("app: transport type not set")
 	}
 
 	d, ok := DescriptorFor(kind)
 	if !ok {
-		return "", fmt.Errorf("app: unknown transport kind %q", kind)
+		return "", fmt.Errorf("app: unknown transport type %q", kind)
 	}
 	if d.EncodeURL == nil {
 		return "", fmt.Errorf("app: transport %q does not support URL encoding", kind)
 	}
 
 	q := url.Values{}
+	q.Set("type", kind)
 	if s.EncryptionPassword != "" {
 		q.Set("pw", s.EncryptionPassword)
 	}
 
-	if err := d.EncodeURL(s.TransportData(), q); err != nil {
+	if err := d.EncodeURL(s.Transport, q); err != nil {
 		return "", fmt.Errorf("app: encode transport %q: %w", kind, err)
 	}
 
-	u := &url.URL{
-		Scheme:   URLScheme,
-		Host:     kind,
-		RawQuery: q.Encode(),
+	for k, v := range s.Advanced {
+		if k == "" || v == nil {
+			continue
+		}
+		q.Set(advancedPrefix+k, encodeValue(v))
 	}
+
+	out := URLScheme + "://?" + q.Encode()
 	if s.Name != "" {
-		u.Fragment = s.Name
+		out += "#" + url.PathEscape(s.Name)
 	}
-	return u.String(), nil
+	return out, nil
+}
+
+func encodeValue(v any) string {
+	switch x := v.(type) {
+	case string:
+		return x
+	case bool:
+		return strconv.FormatBool(x)
+	case int:
+		return strconv.Itoa(x)
+	case int64:
+		return strconv.FormatInt(x, 10)
+	case float64:
+		return strconv.FormatFloat(x, 'f', -1, 64)
+	case []string:
+		return strings.Join(x, ",")
+	case []any:
+		parts := make([]string, 0, len(x))
+		for _, item := range x {
+			parts = append(parts, encodeValue(item))
+		}
+		return strings.Join(parts, ",")
+	default:
+		return fmt.Sprint(v)
+	}
 }

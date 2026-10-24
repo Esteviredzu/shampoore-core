@@ -22,7 +22,15 @@ import (
 
 func main() {
 	configPath := flag.String("c", "config.json", "config file or shampoore:// URL")
+	modeFlag := flag.String("m", "socks5", "mode: socks5|tun|both")
 	flag.Parse()
+
+	mode := app.Mode(*modeFlag)
+	switch mode {
+	case app.ModeSOCKS5, app.ModeTUN, app.ModeBoth:
+	default:
+		log.Fatalf("mode: invalid %q (want socks5|tun|both)", *modeFlag)
+	}
 
 	s, err := app.ParseSource(*configPath)
 	if err != nil {
@@ -55,23 +63,26 @@ func main() {
 		log.Fatalf("runtime start: %v", err)
 	}
 
-	if s.SOCKS5Enabled() {
-		srv := socks5.NewLocalServer(s.SOCKS5.Listen, mux, lg, app.IPv4Only)
+	eff := s.EffectiveAdvanced()
+
+	if mode == app.ModeSOCKS5 || mode == app.ModeBoth {
+		listen := eff.String("socks5_listen", "127.0.0.1:1080")
+		srv := socks5.NewLocalServer(listen, mux, lg, app.IPv4Only)
 		go func() {
 			if err := srv.ListenAndServe(ctx); err != nil {
 				log.Printf("socks5 stopped: %v", err)
 			}
 		}()
-		println("socks5 listening on", s.SOCKS5.Listen)
+		println("socks5 listening on", listen)
 	}
 
-	if s.TUNEnabled() {
+	if mode == app.ModeTUN || mode == app.ModeBoth {
 		go func() {
 			if err := runtime.StartClientTUN(ctx, s, rt, mux); err != nil {
 				log.Printf("tun stopped: %v", err)
 			}
 		}()
-		println("tun enabled on", s.TUN.Name)
+		println("tun enabled on", eff.String("tun_name", "shampoore0"))
 	}
 
 	println("client: ready")
