@@ -11,7 +11,6 @@ type Mode string
 const (
 	ModeSOCKS5 Mode = "socks5"
 	ModeTUN    Mode = "tun"
-	ModeBoth   Mode = "both"
 )
 
 type Settings struct {

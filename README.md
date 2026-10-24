@@ -28,11 +28,13 @@
 ## Как это работает
 
 ```
-Приложения -> (SOCKS5) -> shampoore-client -> кастомный транспорт-сервис -> shampoore-server -> Интернет
-Приложения -> (TUN)    -> shampoore-client -> кастомный транспорт-сервис -> shampoore-server -> Интернет
+Приложения -> (SOCKS5) -> shampoore-client -> кастомный транспорт -> shampoore-server -> Интернет
+Приложения -> (TUN) -> shampoore-client -> кастомный транспорт -> shampoore-server -> Интернет
 ```
 
-- **Клиент** принимает трафик либо через локальный SOCKS5 (`127.0.0.1:1080`), либо через TUN-интерфейс - и гонит его через выбранный транспорт на сервер.
+- **Клиент** работает в одном из двух режимов (флаг `-m`):
+  - `socks5` - локальный SOCKS5-прокси, маршруты не трогаем;
+  - `tun` - TUN-интерфейс, весь системный трафик через туннель.
 - **Сервер** открывает TCP-соединения к реальным адресам, гоняет данные обратно.
 - **Транспорт** - сервис-посредник, через который ходят данные.
 
@@ -55,7 +57,7 @@ go build -o shampoore-server ./cmd/shampoore-server
 
 ### Android (AAR)
 
-Нужны: Go >= 1.23, Android NDK, gomobile.
+Нужны: Go >= 1.23, Android NDK, gomobile. Дальше всё через скрипт:
 
 ```bash
 go install golang.org/x/mobile/cmd/gomobile@latest
@@ -66,22 +68,41 @@ export ANDROID_NDK_HOME=/path/to/ndk
 ./build-aar.sh
 ```
 
-На выходе появятся `shampoore.aar` и `shampoore-sources.jar`
+На выходе появятся `shampoore.aar` и `shampoore-sources.jar`.
 
-## Настройка
+## Формат конфига
 
-Конфиг - JSON-файл. Один файл - один конфиг.
+Конфиг - JSON, единый для всех транспортов:
+
+```json
+{
+  "name": "название",
+  "type": "yandex",
+  "transport": { "hash": "..." },
+  "encryption_password": "VERY HARD PASSWORD",
+  "advanced": { "tun_mtu": 1400 }
+}
+```
+
+- **`type`** - kind транспорта (`yandex`, `yandex_telemost_raw`, `yandex_telemost_squares`).
+- **`transport`** - транспорт-специфичный конфиг.
+- **`encryption_password`** - пароль для XChaCha20-Poly1305. Должен совпадать на клиенте и сервере.
+- **`advanced`** - плоский map с оверрайдами дефолтов. Попадает в URL как `a.<key>=<value>`. Что не задано - берётся из дефолтов транспорта.
+
+Режим (`socks5`/`tun`) в конфиге не хранится - только флаг CLI `-m` (или `VpnService` на мобилке).
+
+## Примеры конфигов
 
 ### Yandex Board
 
 ```json
 {
   "name": "yandex-board",
-  "encryption_password": "VERY HARD PASSWORD",
-  "mode": "tun",
-  "yandex": {
+  "type": "yandex",
+  "transport": {
     "hash": "yandexboard_hash"
-  }
+  },
+  "encryption_password": "VERY HARD PASSWORD"
 }
 ```
 
@@ -90,28 +111,28 @@ export ANDROID_NDK_HOME=/path/to/ndk
 ```json
 {
   "name": "telemost-raw",
-  "encryption_password": "VERY HARD PASSWORD",
-  "mode": "tun",
-  "transport_kind": "yandex_telemost_raw",
-  "yandex_telemost_raw": {
-    "conference_link": "https://telemost.yandex.ru/j/XXXXXXXX",
+  "type": "yandex_telemost_raw",
+  "transport": {
+    "conference_id": "hash",
     "display_name": "guest"
-  }
+  },
+  "encryption_password": "VERY HARD PASSWORD"
 }
 ```
+
+`conference_id` - это только хэш из ссылки `https://telemost.yandex.ru/j/<хэш>`.
 
 ### Yandex Telemost squares
 
 ```json
 {
   "name": "telemost-squares",
-  "encryption_password": "VERY HARD PASSWORD",
-  "mode": "tun",
-  "transport_kind": "yandex_telemost_squares",
-  "yandex_telemost_squares": {
-    "conference_link": "https://telemost.yandex.ru/j/XXXXXXXX",
+  "type": "yandex_telemost_squares",
+  "transport": {
+    "conference_id": "hash",
     "display_name": "guest"
-  }
+  },
+  "encryption_password": "VERY HARD PASSWORD"
 }
 ```
 
@@ -123,52 +144,71 @@ export ANDROID_NDK_HOME=/path/to/ndk
 ./shampoore-server -c config.json
 ```
 
+Серверу режим не нужен, он всегда один и тот же.
+
 **На клиенте:**
 
 ```bash
 # SOCKS5 - без sudo
-./shampoore-client -c config.json
+./shampoore-client -c config.json -m socks5
 
 # TUN - нужен root, потому что меняем маршруты ядра
-sudo ./shampoore-client -c config.json
+sudo ./shampoore-client -c config.json -m tun
 ```
 
-После запуска SOCKS5-прокси доступен на `127.0.0.1:1080`, а при `mode: "tun"` весь системный трафик идёт через туннель.
+Флаги клиента:
+
+| Флаг | Что делает |
+|------|------------|
+| `-c` | путь к конфигу или `shampoore://` URL |
+| `-m` | `socks5` (дефолт) или `tun` |
 
 Проверка:
 
 ```bash
-# Проверка SOCKS5-порта
+# SOCKS5
 curl -4 --socks5-hostname 127.0.0.1:1080 https://ifconfig.me
 
-# При TUN - просто проверить, что интернет работает
+# TUN
 curl -4 https://ifconfig.me
 ```
 
 ## Конфиг через URL
 
-Конфиг можно закодировать в одну строку - по аналогии с `vless://` и `ss://`. Сервер генерирует ссылку:
+Конфиг кодируется в одну строку по аналогии с `vless://` и `ss://`.
+
+В URL попадает:
+
+- `type` - kind транспорта (обязательно);
+- параметры транспорта (`hash`, `conf`, `name`);
+- `pw` - пароль;
+- `a.<key>=<value>` - только те `advanced`-ключи, которые юзер явно выставил;
+- `#<name>` - имя конфига.
+
+Генерация ссылки из json:
 
 ```bash
-./shampoore-server -encode -c config.json
+./shampoore-server -c config.json -encode
 ```
 
 Клиент запускается прямо с URL:
 
 ```bash
-sudo ./shampoore-client -c "shampoore://yandex?hash=...&pw=..."
-sudo ./shampoore-client -c "shampoore://yandex_telemost_raw?conf=https://telemost.yandex.ru/j/...&name=guest&pw=..."
+./shampoore-client -c "shampoore://?type=yandex&hash=...&pw=..." -m socks5
+./shampoore-client -c "shampoore://?type=yandex_telemost_raw&conf=...&pw=..." -m tun
+```
+
+```bash
+sudo ./shampoore-client -c "shampoore://?type=yandex_telemost_raw&conf=...&pw=...&a.kcp_window=1024&a.tun_mtu=1400" -m tun
 ```
 
 ## Шифрование
 
-Трафик между клиентом и сервером шифруется симметричным **XChaCha20-Poly1305**. Ключ выводится из пароля через HKDF-SHA256. Пароль задаётся один раз в `config.json` и должен совпадать на обеих сторонах - клиент и сервер с разными паролями не установят соединение.
+Трафик между клиентом и сервером шифруется симметричным **XChaCha20-Poly1305**. Ключ выводится из пароля через HKDF-SHA256. Пароль задаётся в `encryption_password` и должен совпадать на обеих сторонах - клиент и сервер с разными паролями не установят соединение.
 
 Для Telemost-транспортов дополнительно доступен **FEC** (Reed-Solomon) поверх KCP.
 
-### Как сгенерировать пароль
-
-**Linux / macOS:**
+Пароль:
 
 ```bash
 openssl rand -base64 48
@@ -176,7 +216,31 @@ openssl rand -base64 48
 
 ## Advanced
 
-Все продвинутые настройки живут в секции `advanced`. Поля необязательные - если не указывать, берутся дефолты. Указывайте, только если знаете зачем и почему.
+Всё продвинутое живёт в секции `advanced`. Если не указывать, берутся дефолты. Указывайте, только если знаете зачем.
+
+### Общие
+
+```json
+{
+  "advanced": {
+    "socks5_listen": "127.0.0.1:1080",
+    "tun_name": "shampoore0",
+    "tun_mtu": 1500,
+    "tun_inet4": "172.19.0.1/30",
+    "tun_auto_route": true,
+    "tun_dns": "1.1.1.1:53,8.8.8.8:53",
+    "tun_bypass": "example.com,another.host"
+  }
+}
+```
+
+- **`socks5_listen`** - адрес SOCKS5 в `-m socks5`. В `-m tun` игнорится.
+- **`tun_name`** - имя TUN-интерфейса.
+- **`tun_mtu`** - MTU. Только Linux CLI; на Android задаётся в `VpnService.Builder`.
+- **`tun_inet4`** - адрес TUN с маской.
+- **`tun_auto_route`** - менять ли дефолтный маршрут. `false` - TUN поднимается, роутинг не трогаем.
+- **`tun_dns`** - DNS для резолва bypass-хостов, через запятую.
+- **`tun_bypass`** - доп. хосты/IP мимо туннеля, через запятую.
 
 ### Yandex Board
 
@@ -196,11 +260,11 @@ openssl rand -base64 48
 ```
 
 - **`mux_flush_ms`** - как часто мультиплексор отправляет накопленные кадры.
-- **`mux_flush_threshold`** - сколько байт накопить, чтобы отправить кадры немедленно, не дожидаясь `mux_flush_ms`.
-- **`reliable_window`** - сколько пакетов может быть в полёте одновременно, не дожидаясь подтверждения.
+- **`mux_flush_threshold`** - сколько байт накопить, чтобы отправить не дожидаясь `mux_flush_ms`.
+- **`reliable_window`** - сколько пакетов в полёте одновременно.
 - **`reliable_chunk`** - размер чанка. 0 - автоматически.
-- **`padding_enabled`** - включить выравнивание размера сообщений.
-- **`padding_target`** - до какого размера выравнивать, в байтах. Верхний предел ограничен максимальным размером сообщения транспорта. Для Yandex Board это ~15000 байт.
+- **`padding_enabled`** - выравнивание размера сообщений.
+- **`padding_target`** - до какого размера выравнивать, в байтах.
 - **`jitter_min_ms` / `jitter_max_ms`** - случайная задержка перед каждым исходящим сообщением.
 
 ### Yandex Telemost raw
@@ -228,7 +292,7 @@ openssl rand -base64 48
 }
 ```
 
-### Yandex Telemost (squares)
+### Yandex Telemost squares
 
 ```json
 {
@@ -256,31 +320,57 @@ openssl rand -base64 48
 }
 ```
 
-- **`kcp_conv`** - conv id для KCP. Если 0 - выводится из ссылки на конференцию, так что клиент и сервер автоматически сойдутся.
-- **`kcp_mtu`** - максимальный размер пакета KCP. Для squares сильно ниже (390 по умолчанию), потому что кадр несёт мало данных.
+- **`kcp_conv`** - conv id для KCP. 0 - выводится из ID конференции, клиент и сервер сойдутся автоматически.
+- **`kcp_mtu`** - максимальный размер пакета KCP. Для squares сильно ниже (390), потому что кадр несёт мало данных.
 - **`kcp_window`, `kcp_nodelay`, `kcp_interval`, `kcp_resend`, `kcp_nc`** - стандартные настройки KCP.
 - **`fec_enabled` / `fec_data_shards` / `fec_parity_shards`** - Reed-Solomon поверх KCP.
-- **`raw_frame_size` / `raw_fps` / `raw_copies` / `raw_gop`** - как формируется VP8-поток у raw-транспорта.
-- **`squares_*`** - размер сетки, размер клетки, бит на клетку, fps и битрейт у squares-транспорта.
+- **`raw_*`** - как формируется VP8-поток у raw-транспорта.
+- **`squares_*`** - сетка, размер клетки, бит на клетку, fps и битрейт у squares.
 
 ## TUN
 
 TUN работает на Linux и на Android (через `VpnService` fd).
 
-На Linux при старте TUN:
+На Linux при старте TUN (`-m tun`):
+
 1. Читает текущий default route.
 2. Резолвит все bypass-хосты транспорта (плюс IP-пиры из WebRTC для Telemost) и добавляет для них отдельные маршруты через старый шлюз - чтобы трафик к самому транспорту не заворачивался в туннель.
 3. Поднимает `/dev/net/tun`, настраивает адрес, дефолтный маршрут, стартует `tun2socks` в режиме `mux://`.
-4. При остановке всё это аккуратно откатывает.
+4. При остановке всё откатывает.
 
 Нужен root, потому что меняем маршруты ядра.
+
+На Android всё то же самое, но:
+
+- host-приложение (Kotlin) создаёт `VpnService` и передаёт `fd` в Go через `Mobile.startClientVPN(source, fd, mtu)`;
+- параметры TUN задаются в `VpnService.Builder`, а не в конфиге;
+- `mode` не используется - приложение зовёт либо `startClient` (SOCKS5), либо `startClientVPN` (TUN).
+
+## API для мобильного
+
+Пакет `mobile` через gomobile экспортирует:
+
+```kotlin
+// SOCKS5-only. Слушает на advanced.socks5_listen.
+Mobile.startClient(source: String): String
+
+// TUN-only. fd и mtu готовит host-приложение.
+Mobile.startClientVPN(source: String, fd: Int, mtu: Int): String
+
+// Остановка любого режима (внутри таймаут 7с).
+Mobile.stopClient()
+
+Mobile.isRunning(): Boolean
+```
+
+`source` - путь к JSON-файлу или `shampoore://`-URL.
 
 ## Архитектура
 
 ```
-cmd/                       - cli
+cmd/                       - cli (client, server)
 mobile/                    - gomobile entrypoint (Android)
-internal/app/              - реестр транспортов, Settings, Runtime
+internal/app/              - реестр транспортов, Settings, Runtime, Values, URL
 internal/multiplexing/     - логические стримы поверх одного канала
 internal/socks5/           - SOCKS5-сервер и проксирование стримов в TCP
 internal/runtime/          - TUN (Linux), VPN fd (Android), tun2socks, muxproxy
@@ -301,7 +391,17 @@ internal/transport/        - Pipe, Transport, декораторы, конкре
 1. Откройте [boards.yandex.ru](https://boards.yandex.ru).
 2. Создайте новую доску. **Используйте новую, чистую доску.**
 3. **Поделиться** > **Редактирование для всех** > **Включить гостевой доступ** > **Права гостей: редактирование**.
-4. Скопируйте хэш из ссылки. Она выглядит так: `https://boards.yandex.ru/whiteboard/?hash=YOUR_HASH`
+4. Скопируйте хэш из ссылки: `https://boards.yandex.ru/whiteboard/?hash=YOUR_HASH`.
+
+В `transport.hash`:
+
+```json
+{
+  "type": "yandex",
+  "transport": { "hash": "YOUR_HASH" },
+  "encryption_password": "..."
+}
+```
 
 Данные ходят base64-строками в объектах на доске. Surface-протокол: WebSocket + socket.io, поверх - ReliableSession.
 
@@ -309,13 +409,25 @@ internal/transport/        - Pipe, Transport, декораторы, конкре
 
 ## Транспорт: Yandex Telemost
 
-### Где взять ссылку
+### Где взять ID
 
 1. Откройте [telemost.yandex.ru](https://telemost.yandex.ru).
 2. Создайте новую конференцию.
-3. Скопируйте ссылку из адресной строки. Она выглядит так: `https://telemost.yandex.ru/j/123456789012345`.
+3. Скопируйте ссылку: `https://telemost.yandex.ru/j/123456789012345`.
+4. В конфиг идёт только последний сегмент (`123456789012345`) как `conference_id`.
 
-Клиент и сервер должны быть в **одной и той же** конференции. Каждый заходит в неё как отдельный участник.
+Клиент и сервер должны быть в **одной и той же** конференции. Каждый заходит как отдельный участник.
+
+```json
+{
+  "type": "yandex_telemost_raw",
+  "transport": {
+    "conference_id": "your_id",
+    "display_name": "guest"
+  },
+  "encryption_password": "..."
+}
+```
 
 ### raw VP8
 
@@ -329,10 +441,10 @@ internal/transport/        - Pipe, Transport, декораторы, конкре
 
 ## Статус
 
-Автор планинирует запилить приложуху на андроид. Мб какие-нибудь другие весёлые транспорты сделать.
+Автор планирует запилить приложуху на андроид. Мб какие-нибудь другие весёлые транспорты сделать.
 
 ## О проекте
 
-Изначально проект сделан на Python, но Python для такого проекта - ещё то извращение, так что оно переделано и дальше пишется на го
+Изначально проект сделан на Python, но Python для такого проекта - ещё то извращение, так что оно переделано и дальше пишется на го.
 
-Я вдохновился [olcrtc](https://github.com/openlibrecommunity/olcrtc) и [OpenFlux](https://github.com/p1neapplexpress/OpenFlux), и захотел наколхозить что-то своё
+Я вдохновился [olcrtc](https://github.com/openlibrecommunity/olcrtc) и [OpenFlux](https://github.com/p1neapplexpress/OpenFlux), и захотел наколхозить что-то своё.

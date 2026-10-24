@@ -22,14 +22,15 @@ import (
 
 func main() {
 	configPath := flag.String("c", "config.json", "config file or shampoore:// URL")
-	modeFlag := flag.String("m", "socks5", "mode: socks5|tun|both")
+	modeFlag := flag.String("m", "socks5",
+		"mode: socks5 (local SOCKS5 proxy only) | tun (full VPN)")
 	flag.Parse()
 
 	mode := app.Mode(*modeFlag)
 	switch mode {
-	case app.ModeSOCKS5, app.ModeTUN, app.ModeBoth:
+	case app.ModeSOCKS5, app.ModeTUN:
 	default:
-		log.Fatalf("mode: invalid %q (want socks5|tun|both)", *modeFlag)
+		log.Fatalf("mode: invalid %q (want socks5|tun)", *modeFlag)
 	}
 
 	s, err := app.ParseSource(*configPath)
@@ -65,7 +66,8 @@ func main() {
 
 	eff := s.EffectiveAdvanced()
 
-	if mode == app.ModeSOCKS5 || mode == app.ModeBoth {
+	switch mode {
+	case app.ModeSOCKS5:
 		listen := eff.String("socks5_listen", "127.0.0.1:1080")
 		srv := socks5.NewLocalServer(listen, mux, lg, app.IPv4Only)
 		go func() {
@@ -74,9 +76,8 @@ func main() {
 			}
 		}()
 		println("socks5 listening on", listen)
-	}
 
-	if mode == app.ModeTUN || mode == app.ModeBoth {
+	case app.ModeTUN:
 		go func() {
 			if err := runtime.StartClientTUN(ctx, s, rt, mux); err != nil {
 				log.Printf("tun stopped: %v", err)

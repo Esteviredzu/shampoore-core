@@ -2,6 +2,7 @@ package mobile
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
 
@@ -21,13 +22,14 @@ var (
 	cancel context.CancelFunc
 	done   chan struct{}
 )
+
 func StartClient(source string) string {
 	mu.Lock()
 	defer mu.Unlock()
 	if cancel != nil {
 		return "shampoore: client already running"
 	}
-	if err := startLocked(source, 0, 0); err != nil {
+	if err := startLocked(source, runSocks5, 0, 0); err != nil {
 		return "shampoore: " + err.Error()
 	}
 	return ""
@@ -39,13 +41,23 @@ func StartClientVPN(source string, fd int, mtu int) string {
 	if cancel != nil {
 		return "shampoore: client already running"
 	}
-	if err := startLocked(source, fd, mtu); err != nil {
+	if fd <= 0 {
+		return "shampoore: invalid TUN fd"
+	}
+	if err := startLocked(source, runTUN, fd, mtu); err != nil {
 		return "shampoore: " + err.Error()
 	}
 	return ""
 }
 
-func startLocked(source string, vpnFD int, vpnMTU int) error {
+type runMode int
+
+const (
+	runSocks5 runMode = iota
+	runTUN
+)
+
+func startLocked(source string, mode runMode, vpnFD int, vpnMTU int) error {
 	s, err := app.ParseSource(source)
 	if err != nil {
 		return err
@@ -75,12 +87,15 @@ func startLocked(source string, vpnFD int, vpnMTU int) error {
 		return err
 	}
 
-	listen := s.EffectiveAdvanced().String("socks5_listen", "127.0.0.1:1080")
-	srv := socks5.NewLocalServer(listen, mux, lg, app.IPv4Only)
-	go func() { _ = srv.ListenAndServe(ctx) }()
-
 	var tunDone chan struct{}
-	if vpnFD > 0 {
+
+	switch mode {
+	case runSocks5:
+		listen := s.EffectiveAdvanced().String("socks5_listen", "127.0.0.1:1080")
+		srv := socks5.NewLocalServer(listen, mux, lg, app.IPv4Only)
+		go func() { _ = srv.ListenAndServe(ctx) }()
+
+	case runTUN:
 		if vpnMTU <= 0 {
 			vpnMTU = 1500
 		}
@@ -92,6 +107,11 @@ func startLocked(source string, vpnFD int, vpnMTU int) error {
 				lg.Warn("mobile: TUN stopped: ", err)
 			}
 		}()
+
+	default:
+		_ = mux.Stop(context.Background())
+		cancelFn()
+		return fmt.Errorf("mobile: unknown run mode %d", mode)
 	}
 
 	cancel = cancelFn
